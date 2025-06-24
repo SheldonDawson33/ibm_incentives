@@ -18,7 +18,7 @@ DEFAULT_TERMS = ["IBM", "International Business Machines"]
 # --- Helpers ---
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
-    xls = pd.ExcelFile(path)
+    xls = pd.ExcelFile(path, engine="openpyxl")
     frames = []
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet, dtype=str)  # read as text; keeps IDs intact
