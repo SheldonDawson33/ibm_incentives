@@ -12,7 +12,7 @@ from io import BytesIO
 st.set_page_config(page_title="IBM Incentive Finder", layout="wide")
 
 # --- Constants ---
-WORKBOOK = "NY Incentive Database Exports 6.24.25.xlsx"
+WORKBOOK = "IBM_Assistance.xlsx"
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
 
 # --- Helpers ---
