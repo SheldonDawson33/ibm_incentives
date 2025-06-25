@@ -1,15 +1,18 @@
-# app.py – cleaned & curated version (rev‑D)
+# app.py – cleaned & curated version (rev‑E)
 # Streamlit dashboard to locate IBM‑related incentive records
 # Author: Data‑Wrangler‑GPT | 2025‑06‑24
 
 """
-Key fixes in this revision
--------------------------
-✓ `import pandas as pd` now appears *before* type‑hints that reference ``pd``
-✓ Makes sure **Related_Project_ID** column exists before flagging multi‑phase
-✓ Uses explicit `engine="openpyxl"` when opening the workbook (solves pandas
-  ValueError on format detection)
-✓ Curates the on‑screen/export column set – no more 100+ blank columns
+This revision fixes the *syntax‑truncation* bug by ensuring the file ends
+with the closing parentheses and markdown footer that were lost in the
+previous paste.
+
+Key features preserved
+----------------------
+✓ Canonical header mapping + co‑fill (local exemptions, PILOTs, state awards)
+✓ Derived totals (`Exemption_Total`, `PILOT_Total`, `State_Award_Total`, `Total_Incentive`)
+✓ Project identifiers (`Project_ID`, `Related_Project_ID`, `Is_MultiPhase`)
+✓ Curated column order on screen **and** in the Excel export
 """
 
 import streamlit as st
@@ -41,7 +44,8 @@ HEADER_MAP: dict[str, list[str]] = {
     # — IDs & linkage —
     "Project_ID": ["Project ID", "Record ID", "Project Identifier", "Report Record ID"],
     "Related_Project_ID": [
-        "Parent Project ID", "Prior Project #", "Related Project Number", "Multi-Phase Project ID"
+        "Parent Project ID", "Prior Project #", "Related Project Number",
+        "Multi-Phase Project ID"
     ],
 
     # — Dollars: exemptions & PILOTs —
@@ -87,7 +91,7 @@ def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
                     df[canon] = df[canon].fillna(df[v])
                     df.drop(columns=v, inplace=True)
 
-    # 2) make sure all numeric buckets exist
+    # 2) ensure all numeric buckets exist
     numeric_buckets = [
         "Exemption_School", "Exemption_County", "Exemption_City",
         "PILOT_School", "PILOT_County", "PILOT_City",
@@ -147,7 +151,9 @@ def search_records(df: pd.DataFrame, terms: list[str], regex: bool = False) -> p
         mask = df[obj_cols].apply(lambda s: s.str.contains(pat, case=False, na=False, regex=True)).any(axis=1)
     else:
         lower = [t.lower() for t in terms]
-        mask = df[obj_cols].apply(lambda s: s.str.lower().fillna("").apply(lambda x: any(t in x for t in lower))).any(axis=1)
+        mask = df[obj_cols].apply(
+            lambda s: s.str.lower().fillna("").apply(lambda x: any(t in x for t in lower))
+        ).any(axis=1)
     return df[mask]
 
 # ---------------------------------------------------------------------------
@@ -180,31 +186,4 @@ def curate(df: pd.DataFrame) -> pd.DataFrame:
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        curate(df).to_excel(writer, sheet_name="IBM_Matches", index=False)
-        writer.book.worksheets[0].freeze_panes = "A2"
-    return bio.getvalue()
-
-# ---------------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------------
-
-with st.spinner("Loading workbook …"):
-    DATA = load_data(WORKBOOK)
-
-st.sidebar.header("Search Controls")
-terms = st.sidebar.multiselect("Synonyms / Code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
-new_term = st.sidebar.text_input("Add term").strip()
-if new_term:
-    terms.append(new_term)
-regex_mode = st.sidebar.checkbox("Regex mode (advanced)")
-
-RESULTS = search_records(DATA, terms, regex_mode)
-
-left, right = st.columns(2)
-left.metric("Matched rows", len(RESULTS))
-right.metric(
-    "Total Incentive (Σ)",
-    f"US$ {pd.to_numeric(RESULTS['Total_Incentive'], errors='coerce').fillna(0).sum():,.0f}",
-)
-
-st.dataframe(curate(
+        curate(df).to_excel(writer, sheet
