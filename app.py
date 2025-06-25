@@ -50,60 +50,70 @@ def to_numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def kpi_totals(df: pd.DataFrame) -> dict[str, float]:
-    """Compute KPI sums.
+    """Compute KPI metrics with duplicate‑safe dollar / job sums.
 
-    • Approvals  – raw row count (do **not** deduplicate).
-    • Other $ / job KPIs – deduplicate by the first available *project id* column
-      so repeated phases of the *same* project don’t double‑count dollars.
+    ▸ **approvals** – raw row count (no dedup).
+    ▸ **state/local/capex/jobs** – summed *once per project* using the first
+      ID‑like column found. If no ID column exists, fall back to raw sums.
     """
 
-    # --- choose a project‑id column if present ---------------------------------
-    id_cols = [
-        "Project ID", "Project Code", "Project Identifier", "Record ID",
+    # -------------------------------------------------------------
+    # 1. Find a project‑ID column
+    id_candidates = [
+        "Project ID", "Project ID #", "Project Code", "Project Identifier",
+        "Record ID", "ProjectNumber", "Project Number",
     ]
-    dedup_df = df.copy()
-    for c in id_cols:
-        if c in dedup_df.columns:
-            dedup_df = dedup_df.drop_duplicates(subset=c, keep="first")
-            break  # use the first id col found
+    id_col = next((c for c in id_candidates if c in df.columns), None)
 
-    res: dict[str, float] = {
-        "approvals": float(len(df)),  # COUNT *rows* regardless of dup id
-        "state_val": 0.0,
-        "local_val": 0.0,
-        "capex": 0.0,
-        "jobs": 0.0,
-    }
+    # 2. Build dedup view (drop duplicate IDs, keep first)
+    dedup_df = (
+        df.drop_duplicates(subset=id_col, keep="first") if id_col else df.copy()
+    )
 
-    # ------------- helpers -----------------------------------------------------
-    def col_sum(name: str) -> float:
-        if name not in dedup_df.columns:
+    # 3. Helper: numeric sum from dedup_df
+    def _sum(col_name: str) -> float:
+        if col_name not in dedup_df.columns:
             return 0.0
-        return (
-            pd.to_numeric(dedup_df[name].str.replace(",", ""), errors="coerce")
-            .fillna(0)
-            .sum()
+        col = pd.to_numeric(
+            dedup_df[col_name].str.replace(",", "", regex=False), errors="coerce"
         )
+        return col.fillna(0).sum()
 
-    # ------------------- KPI formulas -----------------------------------------
-    # Total State Value – per your instruction use "Assistance Amount" (all caps) first.
-    res["state_val"] = col_sum("Assistance Amount")
+    # 4. KPI calculations
+    approvals = float(len(df))  # raw rows
 
-    # Total Local Value – Total Exemptions minus State Sales Tax Exemption per *row*, then sum.
-    if {"Total Exemptions", "State Sales Tax Exemption Amount"}.issubset(dedup_df.columns):
+    state_val = _sum("Assistance Amount")  # primary state incentive column
+
+    local_val = 0.0
+    if {
+        "Total Exemptions",
+        "State Sales Tax Exemption Amount",
+    }.issubset(dedup_df.columns):
         local_series = (
-            pd.to_numeric(dedup_df["Total Exemptions"].str.replace(",", ""), errors="coerce")
-            - pd.to_numeric(dedup_df["State Sales Tax Exemption Amount"].str.replace(",", ""), errors="coerce")
+            pd.to_numeric(
+                dedup_df["Total Exemptions"].str.replace(",", "", regex=False),
+                errors="coerce",
+            )
+            - pd.to_numeric(
+                dedup_df["State Sales Tax Exemption Amount"].str.replace(",", "", regex=False),
+                errors="coerce",
+            )
         ).fillna(0)
-        res["local_val"] = local_series.sum()
+        local_val = local_series.sum()
 
-    # CapEx
-    res["capex"] = col_sum("Total Public-Private Investment") + col_sum("Total Project Amount")
+    capex = _sum("Total Public-Private Investment") + _sum("Total Project Amount")
 
-    # New Jobs / FTEs
-    res["jobs"] = col_sum("Job Creation Commitments (FTEs)") + col_sum("Original Estimate Of Jobs To Be Created")
+    jobs = _sum("Job Creation Commitments (FTEs)") + _sum(
+        "Original Estimate Of Jobs To Be Created"
+    )
 
-    return res
+    return {
+        "approvals": approvals,
+        "state_val": state_val,
+        "local_val": local_val,
+        "capex": capex,
+        "jobs": jobs,
+    }
 
 
 def fmt_dollar(x: float) -> str:
