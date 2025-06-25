@@ -42,12 +42,40 @@ df["$"] = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
 df["_radius"] = df["$"].clip(lower=1) * 2
 
 
-# tiny ZIP→lat/lon lookup just for demo
-lut = {"10001": (40.7506, -73.9972), "14604": (43.1566, -77.6088)}
-coords = df["Postal Code"].map(lut)
-df["lat"] = coords.str[0]; df["lon"] = coords.str[1]
+# ─── Geo-prep ────────────────────────────────────────────────────────────
+# 1) Try to find a ZIP column
+zip_col = None
+for cand in ["Postal Code", "ZIP", "Zip Code", "Zip"]:
+    if cand in df.columns:
+        zip_col = cand
+        break
+
+if zip_col is not None:
+    # quick ZIP→lat/lon lookup (demo only)
+    lut = {
+        "10001": (40.7506, -73.9972),  # NYC
+        "14604": (43.1566, -77.6088),  # Rochester
+    }
+    coords = df[zip_col].map(lut)
+    df["lat"] = coords.str[0]
+    df["lon"] = coords.str[1]
+else:
+    # 2) Fallback: county centroid lookup
+    county_lut = {
+        "Albany": (42.6526, -73.7562),
+        "Monroe": (43.1610, -77.6109),
+    }
+    coords = df["County"].map(county_lut)
+    df["lat"] = coords.str[0]
+    df["lon"] = coords.str[1]
+
+# Drop rows we still can't geocode
 df = df.dropna(subset=["lat", "lon"])
 
+if df.empty:
+    st.warning("No geodata available for the selected sheet/filter.")
+    st.stop()
+# ────────────────────────────────────────────────────────────────────────
 layer = pdk.Layer(
     "ScatterplotLayer",
     data=df,
