@@ -1,7 +1,7 @@
-"""app.py – IBM × CBRE Incentive Finder (REV‑I‑patch1)
+"""app.py – IBM × CBRE Incentive Finder (REV‑I‑patch2)
 ================================================================
-Bug‑fix: KPI calculations returned pandas Series, causing `Series is ambiguous`
-ValueError inside `fmt_dollar`. We now aggregate to scalars with `.sum()`.
+* Silences regex capture warning by switching to a **non‑capturing** group `(?: … )`.
+* Everything else unchanged from patch1 (stable KPI scalars).
 """
 
 import re
@@ -37,20 +37,19 @@ def filter_terms(df: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
     if not terms:
         return df.iloc[0:0]
     obj_cols = df.select_dtypes(include="object").columns
-    pattern = r"\\b(" + "|".join(re.escape(t) for t in terms) + r")\\b"
+    # non‑capturing group avoids pandas warning
+    pattern = r"\b(?:" + "|".join(re.escape(t) for t in terms) + r")\b"
     contains = df[obj_cols].apply(lambda col: col.str.contains(pattern, case=False, na=False, regex=True))
     return df[contains.any(axis=1)]
 
 
 def to_numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
-    """Return numeric column (floats); 0 if column missing."""
     if col not in df.columns:
         return pd.Series([0])
     return pd.to_numeric(df[col].str.replace(",", ""), errors="coerce").fillna(0)
 
 
 def kpi_totals(df: pd.DataFrame) -> dict[str, float]:
-    """Compute sheet‑aware KPI sums and return scalars."""
     res = {
         "approvals": float(len(df)),
         "state_val": 0.0,
@@ -58,33 +57,24 @@ def kpi_totals(df: pd.DataFrame) -> dict[str, float]:
         "capex": 0.0,
         "jobs": 0.0,
     }
-
-    # --- State value ---
     res["state_val"] = (
         to_numeric_col(df, "Total NYS Investment").sum()
         + to_numeric_col(df, "State Sales Tax Exemption Amount").sum()
     )
-
-    # --- Local value (IDA only) ---
     if {"Total Exemptions", "State Sales Tax Exemption Amount"}.issubset(df.columns):
         local_series = (
             to_numeric_col(df, "Total Exemptions")
             - to_numeric_col(df, "State Sales Tax Exemption Amount")
         )
         res["local_val"] = local_series.sum()
-
-    # --- CapEx ---
     res["capex"] = (
         to_numeric_col(df, "Total Public-Private Investment").sum()
         + to_numeric_col(df, "Total Project Amount").sum()
     )
-
-    # --- Jobs / FTEs ---
     res["jobs"] = (
         to_numeric_col(df, "Job Creation Commitments (FTEs)").sum()
         + to_numeric_col(df, "Original Estimate Of Jobs To Be Created").sum()
     )
-
     return res
 
 
@@ -96,7 +86,7 @@ def fmt_dollar(x: float) -> str:
 # ------------------------------------------------------------------
 st.set_page_config(page_title="IBM × CBRE Incentive Finder", layout="wide", page_icon="💵")
 
-# Hero banner ----------------------------------------------------------------
+# Hero banner --------------------------------------------------------------
 hero_html = """
 <style>
 .hero {background:linear-gradient(90deg,#0023ff 0%,#007a3e 100%);padding:32px;border-radius:6px;color:white;text-align:left;}
@@ -110,16 +100,16 @@ hero_html = """
 """
 st.markdown(hero_html, unsafe_allow_html=True)
 
-# Load data -------------------------------------------------------------------
+# Load data -----------------------------------------------------------------
 with st.spinner("Loading workbook …"):
     DATA = load_sheets(WORKBOOK)
 
 RAW_NAMES = list(DATA.keys())[:2]
 DISPLAY_OPTS = [FRIENDLY_NAMES.get(i, n) for i, n in enumerate(RAW_NAMES)] + ["All Sheets"]
 
-# Sidebar filters -------------------------------------------------------------
+# Sidebar filters -----------------------------------------------------------
 st.sidebar.subheader("Add or remove terms")
-terms_chips = st_tags(label="", text="Press enter to add", value=DEFAULT_TERMS, suggestions=[], maxtags=10)
+terms_chips = st_tags(label="", text="Press enter to add", value=DEFAULT_TERMS, maxtags=10)
 
 sheet_display = st.sidebar.radio("Choose data view", DISPLAY_OPTS, index=len(DISPLAY_OPTS)-1)
 if sheet_display == "All Sheets":
@@ -128,10 +118,10 @@ else:
     raw_name = RAW_NAMES[DISPLAY_OPTS.index(sheet_display)]
     current_df = DATA[raw_name].copy()
 
-# Filter by terms -------------------------------------------------------------
+# Filter by terms -----------------------------------------------------------
 filtered_df = filter_terms(current_df, terms_chips)
 
-# KPIs ------------------------------------------------------------------------
+# KPIs ----------------------------------------------------------------------
 kpi = kpi_totals(filtered_df)
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("# Incentive Approvals", f"{kpi['approvals']:,.0f}")
@@ -142,10 +132,11 @@ col5.metric("New Jobs / FTEs", f"{kpi['jobs']:,.0f}")
 
 st.divider()
 
-# Data table ------------------------------------------------------------------
+# Data table ---------------------------------------------------------------
 st.dataframe(filtered_df, use_container_width=True, hide_index=True)
 
-# Download --------------------------------------------------------------------
+# Download -----------------------------------------------------------------
+
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
