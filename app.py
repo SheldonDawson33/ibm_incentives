@@ -1,4 +1,101 @@
-# app.py – cleaned & curated version\n# Streamlit dashboard to locate IBM‑related incentive records\n# Author: Data‑Wrangler‑GPT | 2025‑06‑24 (rev‑B)\n\nimport streamlit as st\nimport pandas as pd\nfrom io import BytesIO\n\nst.set_page_config(page_title="IBM Incentive Finder", layout="wide")\n\n# ----------------------------------------------------------------------------\n# Constants\n# ----------------------------------------------------------------------------\nWORKBOOK = "ny_incentives_full.xlsx"  # change here only if the file name changes\nDEFAULT_TERMS = ["IBM", "International Business Machines"]\n\n# ----------------------------------------------------------------------------\n# Canonical header map – add variants as you discover them\n# ----------------------------------------------------------------------------\nHEADER_MAP = {\n    # — Identity —\n    "Recipient_Name": ["Recipient", "Company Name", "Applicant Name"],\n    "Project_Name":   ["Project", "Project Title", "Name of Project"],\n    "Municipality":   ["City/Town", "Municipality", "Project City", "Recipient City"],\n    "County":         ["County", "Project County", "Recipient County"],\n    "Postal_Code":    ["Zip", "Zip Code", "Postal Code"],\n\n    # — IDs & linkage —\n    "Project_ID": ["Project ID", "Record ID", "Project Identifier", "Report Record ID"],\n    "Related_Project_ID": ["Parent Project ID", "Prior Project #", "Related Project Number",\n                            "Multi-Phase Project ID"],\n\n    # — Dollars: exemptions & PILOTs —\n    "Exemption_School": ["School District Exemption", "School Tax Abated"],\n    "Exemption_County": ["County Exemption", "County Tax Abated"],\n    "Exemption_City":   ["City/Town Exemption", "City Tax Abated"],\n    "PILOT_School":     ["School PILOT Payments Scheduled", "School PILOT"],\n    "PILOT_County":     ["County PILOT Payments Scheduled", "County PILOT"],\n    "PILOT_City":       ["City PILOT Payments Scheduled", "City PILOT"],\n\n    # — State‑level awards —\n    "State_Award": ["Assistance Amount", "Tax Credit Amount", "Grant Award",\n                     "Capital Grant Amount", "Empire State Jobs Retention Credit"],\n\n    # — Jobs —\n    "Jobs_Plan_Total":        ["Jobs Planned", "Jobs to be Created", "Employment Target"],\n    "Jobs_Created_ToDate":    ["Jobs Created", "FTEs Reported"],\n    "Average_Salary":         ["Average Salary", "Avg Annual Wage"],\n\n    # — Dates —\n    "Board_Approval_Date":    ["Board Approval Date", "Date Approved"],\n    "Project_Start_Date":     ["Project Start Date", "Construction Start"],\n    "Project_Completion_Date": ["Project Completion Date", "Construction Completion"],\n}\n\n# ----------------------------------------------------------------------------\n# Helper: harmonise & tidy each sheet\n# ----------------------------------------------------------------------------\n\ndef harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:\n    df.columns = df.columns.str.strip()\n\n    # 1) rename & co‑fill variants into canonical columns\n    for canon, variants in HEADER_MAP.items():\n        for v in variants:\n            if v in df.columns:\n                if canon not in df.columns:\n                    df.rename(columns={v: canon}, inplace=True)\n                else:  # co‑fill blanks\n                    df[canon] = df[canon].fillna(df[v])\n                    df.drop(columns=v, inplace=True)\n\n    # 2) ensure key numeric buckets exist even if blank in this sheet\n    for col in ["Exemption_School", "Exemption_County", "Exemption_City",\n                 "PILOT_School", "PILOT_County", "PILOT_City",\n                 "State_Award"]:\n        if col not in df.columns:\n            df[col] = pd.NA\n\n    # 3) derive totals & flags\n    df["Exemption_Total"] = df[["Exemption_School", "Exemption_County", "Exemption_City"]]\n        .apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)\n    df["PILOT_Total"] = df[["PILOT_School", "PILOT_County", "PILOT_City"]]\n        .apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)\n    df["State_Award_Total"] = pd.to_numeric(df["State_Award"], errors="coerce").fillna(0)\n    df["Total_Incentive"] = df["Exemption_Total"] + df["State_Award_Total"] - df["PILOT_Total"]\n    df["Is_MultiPhase"] = df["Related_Project_ID"].notna()\n\n    # 4) drop fully blank columns & duplicates\n    df.dropna(axis=1, how="all", inplace=True)\n    df = df.loc[:, ~df.columns.duplicated()].copy()\n    return df\n\n# ----------------------------------------------------------------------------\n# Data loader (cached)\n# ----------------------------------------------------------------------------\n@st.cache_data(show_spinner=False)
+# app.py – cleaned & curated version
+# Streamlit dashboard to locate IBM‑related incentive records
+# Author: Data‑Wrangler‑GPT | 2025‑06‑24 (rev‑C)
+
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+
+st.set_page_config(page_title="IBM Incentive Finder", layout="wide")
+
+# ----------------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------------
+WORKBOOK = "ny_incentives_full.xlsx"  # change here only if the file name changes
+DEFAULT_TERMS = ["IBM", "International Business Machines"]
+
+# ----------------------------------------------------------------------------
+# Canonical header map – add variants as you discover them
+# ----------------------------------------------------------------------------
+HEADER_MAP = {
+    # — Identity —
+    "Recipient_Name": ["Recipient", "Company Name", "Applicant Name"],
+    "Project_Name":   ["Project", "Project Title", "Name of Project"],
+    "Municipality":   ["City/Town", "Municipality", "Project City", "Recipient City"],
+    "County":         ["County", "Project County", "Recipient County"],
+    "Postal_Code":    ["Zip", "Zip Code", "Postal Code"],
+
+    # — IDs & linkage —
+    "Project_ID": ["Project ID", "Record ID", "Project Identifier", "Report Record ID"],
+    "Related_Project_ID": ["Parent Project ID", "Prior Project #", "Related Project Number",
+                            "Multi-Phase Project ID"],
+
+    # — Dollars: exemptions & PILOTs —
+    "Exemption_School": ["School District Exemption", "School Tax Abated"],
+    "Exemption_County": ["County Exemption", "County Tax Abated"],
+    "Exemption_City":   ["City/Town Exemption", "City Tax Abated"],
+    "PILOT_School":     ["School PILOT Payments Scheduled", "School PILOT"],
+    "PILOT_County":     ["County PILOT Payments Scheduled", "County PILOT"],
+    "PILOT_City":       ["City PILOT Payments Scheduled", "City PILOT"],
+
+    # — State‑level awards —
+    "State_Award": ["Assistance Amount", "Tax Credit Amount", "Grant Award",
+                     "Capital Grant Amount", "Empire State Jobs Retention Credit"],
+
+    # — Jobs —
+    "Jobs_Plan_Total":        ["Jobs Planned", "Jobs to be Created", "Employment Target"],
+    "Jobs_Created_ToDate":    ["Jobs Created", "FTEs Reported"],
+    "Average_Salary":         ["Average Salary", "Avg Annual Wage"],
+
+    # — Dates —
+    "Board_Approval_Date":    ["Board Approval Date", "Date Approved"],
+    "Project_Start_Date":     ["Project Start Date", "Construction Start"],
+    "Project_Completion_Date": ["Project Completion Date", "Construction Completion"],
+}
+
+# ----------------------------------------------------------------------------
+# Helper: harmonise & tidy each sheet
+# ----------------------------------------------------------------------------
+
+def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = df.columns.str.strip()
+
+    # 1) rename & co‑fill variants into canonical columns
+    for canon, variants in HEADER_MAP.items():
+        for v in variants:
+            if v in df.columns:
+                if canon not in df.columns:
+                    df.rename(columns={v: canon}, inplace=True)
+                else:
+                    df[canon] = df[canon].fillna(df[v])
+                    df.drop(columns=v, inplace=True)
+
+    # 2) ensure numeric buckets exist even if blank in this sheet
+    for col in [
+        "Exemption_School", "Exemption_County", "Exemption_City",
+        "PILOT_School", "PILOT_County", "PILOT_City",
+        "State_Award",
+    ]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # 3) derive totals & flags
+    df["Exemption_Total"] = df[["Exemption_School", "Exemption_County", "Exemption_City"]].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+    df["PILOT_Total"] = df[["PILOT_School", "PILOT_County", "PILOT_City"]].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+    df["State_Award_Total"] = pd.to_numeric(df["State_Award"], errors="coerce").fillna(0)
+    df["Total_Incentive"] = df["Exemption_Total"] + df["State_Award_Total"] - df["PILOT_Total"]
+    df["Is_MultiPhase"] = df["Related_Project_ID"].notna()
+
+    # 4) drop fully blank columns & duplicates
+    df.dropna(axis=1, how="all", inplace=True)
+    df = df.loc[:, ~df.columns.duplicated()].copy()
+    return df
+
+# ----------------------------------------------------------------------------
+# Data loader (cached)
+# ----------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:  # noqa: D401
     """Read all sheets, tidy, and concatenate."""
     xls = pd.ExcelFile(path, engine="openpyxl")
@@ -31,8 +128,8 @@ def search_records(df: pd.DataFrame, terms: list[str], regex: bool = False) -> p
 
 PREFERRED_ORDER = [
     # identity / linkage
-    "Source_Sheet", "Authority_Name", "Program_Name",
-    "Project_ID", "Related_Project_ID", "Is_MultiPhase",
+    "Source_Sheet", "Project_ID", "Related_Project_ID", "Is_MultiPhase",
+    "Authority_Name", "Program_Name",
     "Project_Name", "Recipient_Name", "Industry",
     "Municipality", "County", "State", "Postal_Code",
 
@@ -65,29 +162,24 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
+
 with st.spinner("Loading workbook …"):
     DATA = load_data(WORKBOOK)
 
 st.sidebar.header("Search Controls")
 terms = st.sidebar.multiselect("Synonyms / Code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
-new = st.sidebar.text_input("Add term").strip()
-if new:
-    terms.append(new)
+new_term = st.sidebar.text_input("Add term").strip()
+if new_term:
+    terms.append(new_term)
 regex_mode = st.sidebar.checkbox("Regex mode (advanced)")
 
 RESULTS = search_records(DATA, terms, regex_mode)
 
 left, right = st.columns(2)
 left.metric("Matched rows", len(RESULTS))
-right.metric("Total Incentive (Σ)", f"US$ {pd.to_numeric(RESULTS['Total_Incentive'], errors='coerce').fillna(0).sum():,.0f}")
-
-st.dataframe(subset_cols(RESULTS), use_container_width=True)
-
-st.download_button(
-    "Download filtered rows (Excel)",
-    data=to_excel_bytes(RESULTS),
-    file_name="IBM_Assistance_clean.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+right.metric(
+    "Total Incentive (Σ)",
+    f"US$ {pd.to_numeric(RESULTS['Total_Incentive'], errors='coerce').fillna(0).sum():,.0f}",
 )
 
-st.markdown("""---\n**Instructions**\n1. Use the sidebar to refine search terms.\n2. Regex mode treats each term as a regular expression.\n3. Click **Download** to export the current view.\n""")
+st.data
