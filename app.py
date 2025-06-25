@@ -50,31 +50,59 @@ def to_numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def kpi_totals(df: pd.DataFrame) -> dict[str, float]:
-    res = {
-        "approvals": float(len(df)),
+    """Compute KPI sums.
+
+    • Approvals  – raw row count (do **not** deduplicate).
+    • Other $ / job KPIs – deduplicate by the first available *project id* column
+      so repeated phases of the *same* project don’t double‑count dollars.
+    """
+
+    # --- choose a project‑id column if present ---------------------------------
+    id_cols = [
+        "Project ID", "Project Code", "Project Identifier", "Record ID",
+    ]
+    dedup_df = df.copy()
+    for c in id_cols:
+        if c in dedup_df.columns:
+            dedup_df = dedup_df.drop_duplicates(subset=c, keep="first")
+            break  # use the first id col found
+
+    res: dict[str, float] = {
+        "approvals": float(len(df)),  # COUNT *rows* regardless of dup id
         "state_val": 0.0,
         "local_val": 0.0,
         "capex": 0.0,
         "jobs": 0.0,
     }
-    res["state_val"] = (
-        to_numeric_col(df, "Total NYS Investment").sum()
-        + to_numeric_col(df, "State Sales Tax Exemption Amount").sum()
-    )
-    if {"Total Exemptions", "State Sales Tax Exemption Amount"}.issubset(df.columns):
-        local_series = (
-            to_numeric_col(df, "Total Exemptions")
-            - to_numeric_col(df, "State Sales Tax Exemption Amount")
+
+    # ------------- helpers -----------------------------------------------------
+    def col_sum(name: str) -> float:
+        if name not in dedup_df.columns:
+            return 0.0
+        return (
+            pd.to_numeric(dedup_df[name].str.replace(",", ""), errors="coerce")
+            .fillna(0)
+            .sum()
         )
+
+    # ------------------- KPI formulas -----------------------------------------
+    # Total State Value – per your instruction use "Assistance Amount" (all caps) first.
+    res["state_val"] = col_sum("Assistance Amount")
+
+    # Total Local Value – Total Exemptions minus State Sales Tax Exemption per *row*, then sum.
+    if {"Total Exemptions", "State Sales Tax Exemption Amount"}.issubset(dedup_df.columns):
+        local_series = (
+            pd.to_numeric(dedup_df["Total Exemptions"].str.replace(",", ""), errors="coerce")
+            - pd.to_numeric(dedup_df["State Sales Tax Exemption Amount"].str.replace(",", ""), errors="coerce")
+        ).fillna(0)
         res["local_val"] = local_series.sum()
-    res["capex"] = (
-        to_numeric_col(df, "Total Public-Private Investment").sum()
-        + to_numeric_col(df, "Total Project Amount").sum()
-    )
-    res["jobs"] = (
-        to_numeric_col(df, "Job Creation Commitments (FTEs)").sum()
-        + to_numeric_col(df, "Original Estimate Of Jobs To Be Created").sum()
-    )
+
+    # CapEx
+    res["capex"] = col_sum("Total Public-Private Investment") + col_sum("Total Project Amount")
+
+    # New Jobs / FTEs
+    res["jobs"] = col_sum("Job Creation Commitments (FTEs)") + col_sum("Original Estimate Of Jobs To Be Created")
+
     return res
 
 
