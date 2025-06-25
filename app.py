@@ -16,15 +16,52 @@ WORKBOOK = "ny_incentives_full.xlsx"
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
 
 # --- Helpers ---
+# ---- Column harmonisation ----------------------------------------------
+# Canonical header name : list of variant names that appear in one or more sheets
+HEADER_MAP = {
+    "Recipient Name": ["Recipient", "Company", "Company Name", "Applicant Name"],
+    "Project Name":   ["Project", "Project Title", "Project_Name"],
+    "Incentive Type": ["Incentive", "Benefit Type"],
+    "Incentive Amount": ["Total Incentive", "Amount", "Value"],
+    "Approval Date":  ["Date Approved", "Approval"],
+}
+
+def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    # 1) Strip whitespace from every header
+    df.columns = df.columns.str.strip()
+
+    # 2) Rename variant headers to their canonical form
+    for canonical, variants in HEADER_MAP.items():
+        for variant in variants:
+            if variant in df.columns:
+                df.rename(columns={variant: canonical}, inplace=True)
+
+    # 3) Drop columns that are entirely empty
+    df.dropna(axis=1, how="all", inplace=True)
+
+    # 4) Remove accidental duplicate columns
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    return df
+# -------------------------------------------------------------------------
+
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
     xls = pd.ExcelFile(path, engine="openpyxl")
     frames = []
     for sheet in xls.sheet_names:
-        df = pd.read_excel(xls, sheet_name=sheet, dtype=str)  # read as text; keeps IDs intact
+        # Read each sheet as text to avoid dtype surprises
+        df = pd.read_excel(xls, sheet_name=sheet, dtype=str)
         df["Source_Sheet"] = sheet
+
+        # NEW — tidy headers, drop blanks, de-duplicate
+        df = harmonise_columns(df)
+
         frames.append(df)
+
+    # Merge all sheets into one tidy DataFrame
     return pd.concat(frames, ignore_index=True)
+
 
 def search_records(df: pd.DataFrame, terms: list[str], regex: bool = False) -> pd.DataFrame:
     """Return rows where ANY text column contains ANY term (case‑insensitive)."""
