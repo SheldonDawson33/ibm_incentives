@@ -1,16 +1,17 @@
-# app.py – cleaned & curated version (rev‑E)
+# app.py – cleaned & curated version (rev‑E‑full)
 # Streamlit dashboard to locate IBM‑related incentive records
 # Author: Data‑Wrangler‑GPT | 2025‑06‑24
 
 """
-This revision fixes the *syntax‑truncation* bug by ensuring the file ends
-with the closing parentheses and markdown footer that were lost in the
-previous paste.
+This fully‑self‑contained revision fixes the truncation error (missing closing
+parentheses) and the earlier import‑ordering bug. It also ensures the Excel
+export writes to a named sheet and freezes the header row.
 
-Key features preserved
-----------------------
+Key features
+------------
 ✓ Canonical header mapping + co‑fill (local exemptions, PILOTs, state awards)
-✓ Derived totals (`Exemption_Total`, `PILOT_Total`, `State_Award_Total`, `Total_Incentive`)
+✓ Derived totals (`Exemption_Total`, `PILOT_Total`, `State_Award_Total`,
+  `Total_Incentive`)
 ✓ Project identifiers (`Project_ID`, `Related_Project_ID`, `Is_MultiPhase`)
 ✓ Curated column order on screen **and** in the Excel export
 """
@@ -27,7 +28,7 @@ st.set_page_config(page_title="IBM Incentive Finder", layout="wide")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-WORKBOOK = "ny_incentives_full.xlsx"  # change only if the filename changes
+WORKBOOK = "ny_incentives_full.xlsx"  # change if the workbook filename changes
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
 
 # ---------------------------------------------------------------------------
@@ -45,7 +46,7 @@ HEADER_MAP: dict[str, list[str]] = {
     "Project_ID": ["Project ID", "Record ID", "Project Identifier", "Report Record ID"],
     "Related_Project_ID": [
         "Parent Project ID", "Prior Project #", "Related Project Number",
-        "Multi-Phase Project ID"
+        "Multi-Phase Project ID",
     ],
 
     # — Dollars: exemptions & PILOTs —
@@ -91,11 +92,10 @@ def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
                     df[canon] = df[canon].fillna(df[v])
                     df.drop(columns=v, inplace=True)
 
-    # 2) ensure all numeric buckets exist
+    # 2) ensure numeric buckets & related ID exist so .sum() works
     numeric_buckets = [
         "Exemption_School", "Exemption_County", "Exemption_City",
-        "PILOT_School", "PILOT_County", "PILOT_City",
-        "State_Award",
+        "PILOT_School", "PILOT_County", "PILOT_City", "State_Award",
     ]
     for col in numeric_buckets + ["Related_Project_ID"]:
         if col not in df.columns:
@@ -115,10 +115,12 @@ def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
         .sum(axis=1)
     )
     df["State_Award_Total"] = pd.to_numeric(df["State_Award"], errors="coerce").fillna(0)
-    df["Total_Incentive"] = df["Exemption_Total"] + df["State_Award_Total"] - df["PILOT_Total"]
+    df["Total_Incentive"] = (
+        df["Exemption_Total"] + df["State_Award_Total"] - df["PILOT_Total"]
+    )
     df["Is_MultiPhase"] = df["Related_Project_ID"].notna()
 
-    # 4) drop blank columns & duplicates
+    # 4) drop completely blank columns & duplicates
     df.dropna(axis=1, how="all", inplace=True)
     df = df.loc[:, ~df.columns.duplicated()].copy()
     return df
@@ -128,7 +130,7 @@ def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
-def load_data(path: str) -> pd.DataFrame:  # noqa: D401
+def load_data(path: str) -> pd.DataFrame:
     """Read all sheets, tidy each, concatenate."""
     xls = pd.ExcelFile(path, engine="openpyxl")
     frames = []
@@ -148,7 +150,9 @@ def search_records(df: pd.DataFrame, terms: list[str], regex: bool = False) -> p
     obj_cols = df.select_dtypes("object").columns
     if regex:
         pat = "|".join(terms)
-        mask = df[obj_cols].apply(lambda s: s.str.contains(pat, case=False, na=False, regex=True)).any(axis=1)
+        mask = df[obj_cols].apply(
+            lambda s: s.str.contains(pat, case=False, na=False, regex=True)
+        ).any(axis=1)
     else:
         lower = [t.lower() for t in terms]
         mask = df[obj_cols].apply(
@@ -177,13 +181,50 @@ PREFERRED_ORDER = [
     "Board_Approval_Date", "Project_Start_Date", "Project_Completion_Date",
 ]
 
-
 def curate(df: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in PREFERRED_ORDER if c in df.columns]
     return df[cols + [c for c in df.columns if c not in cols]]
 
+# ---------------------------------------------------------------------------
+# Excel export helper
+# ---------------------------------------------------------------------------
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        curate(df).to_excel(writer, sheet
+        curate(df).to_excel(writer, sheet_name="IBM_Matches", index=False)
+        ws = writer.book.worksheets[0]
+        ws.freeze_panes = ws["A2"]
+    bio.seek(0)
+    return bio.getvalue()
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+with st.spinner("Loading workbook…"):
+    DATA = load_data(WORKBOOK)
+
+# Sidebar – search controls
+st.sidebar.header("Search Controls")
+synonyms = st.sidebar.multiselect(
+    "Synonyms / Code‑names", options=DEFAULT_TERMS, default=DEFAULT_TERMS
+)
+new_term = st.sidebar.text_input("Add term").strip()
+if new_term:
+    synonyms.append(new_term)
+regex_mode = st.sidebar.checkbox("Regex mode (advanced)", value=False)
+
+# Filter
+filtered = search_records(DATA, synonyms, regex_mode)
+
+# Metrics
+c1, c2 = st.columns(2)
+c1.metric("Matched rows", len(filtered))
+c2.metric(
+    "Σ Total Incentive",
+    f"US$ {filtered['Total_Incentive'].sum():,.0f}",
+)
+
+# Data table
+st.dataframe(curate(filtered), use_container
