@@ -1,108 +1,93 @@
-"""IBM Incentives Dashboard (clean schema)
-=================================================
-A Streamlit application that consolidates five NY‑state incentive source
-sheets into a single, tidy DataFrame tailored for IBM executives.
+# app.py – IBM Incentive Finder (REV‑G – full mapping)
+# ---------------------------------------------------
+# Streamlit dashboard that consolidates five NY‑state incentive source
+# sheets into a single, clean DataFrame for IBM executives.
 
-Key features
-------------
-• Canonical 4‑layer schema (financials, compliance, geography, metadata)
-• Exhaustive header mapping → co‑fills variants into a single column
-• Derived totals (Exemption$, PILOT$, State Award$, Net Benefit$)
-• Project identifiers + multi‑phase flag
-• Compact on‑screen view; Excel/CSV export matches the view
-
-Author: Data‑Wrangler‑GPT  |  Rev‑G 2025‑06‑24
+"""
+Major fixes
+===========
+* Exhaustive header mapping based on full inspection of all 5 sheets.
+* Correct calculation of Exemption/PILOT totals and Net_Benefit.
+* `curate()` helper to show only curated columns, eliminating the 160‑col sprawl.
+* Robust handling of blank or missing columns.
+* No dangling parentheses (syntax checked with `python -m py_compile`).
 """
 
-# ------------------------------------------------------------------
-# Imports & config
-# ------------------------------------------------------------------
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="IBM Incentives Dashboard", layout="wide")
+st.set_page_config(page_title="IBM Incentive Finder", layout="wide")
 
-# ------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Constants
-# ------------------------------------------------------------------
-WORKBOOK = "ny_incentives_full.xlsx"  # uploaded in repo
+WORKBOOK = "ny_incentives_full.xlsx"
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
 
-# Primary display order (40 columns)
+# ----------------------------------------------------------------------------
+# Canonical schema & header mapping
+# ---------------------------------------------------------------------------
+HEADER_MAP = {
+    # ---- IDs & meta ----
+    "Project_ID": ["Project Code", "Record ID", "Project Identifier"],
+    "Related_Project_ID": ["Original Project Code"],
+    "Is_MultiPhase_Flag": ["Part of or related to multi-phase project"],
+
+    # ---- Geography ----
+    "Municipality": ["Project City", "Municipality", "Recipient City"],
+    "County": ["County", "Project County"],
+    "Postal_Code": ["Project Postal Code", "Postal Code", "Zip Code"],
+
+    # ---- Award amounts (state level) ----
+    "State_Award": [
+        "Assistance Amount", "Tax Credit Amount", "Grant Award",
+        "Capital Grant Amount", "Empire State Jobs Retention Credit",
+    ],
+
+    # ---- Local tax exemptions ----
+    "Exemption_School": ["School Property Tax Exemption Amount", "School District Exemption"],
+    "Exemption_County": ["County Real Property Tax Exemption Amount"],
+    "Exemption_City": ["Local Property Tax Exemption Amount", "City/Town Property Tax Exemption Amount"],
+
+    # ---- PILOTs ----
+    "PILOT_School": ["School District PILOT Due", "School District PILOT Made"],
+    "PILOT_County": ["County PILOT Due", "County PILOT Made"],
+    "PILOT_City": ["Local PILOT Due", "Local PILOT Made"],
+
+    # ---- Jobs ----
+    "Jobs_Plan_Total": ["Job Creation Commitments (FTEs)", "Jobs Planned"],
+    "Jobs_Created_ToDate": ["Total Employees at the site (FTEs)", "Jobs Created"],
+
+    # ---- Dates ----
+    "Board_Approval_Date": ["Date Project Approved", "Board Approval Date"],
+}
+
+# Preferred order for UI/export
 PREFERRED_ORDER = [
-    # Layer 1 · Financials
-    "Assistance_Type", "Exemption_School", "Exemption_County", "Exemption_City",
-    "Exemption_Total", "PILOT_School", "PILOT_County", "PILOT_City", "PILOT_Total",
+    # meta
+    "Source_Sheet", "Authority_Name", "Program_Name",
+    "Project_ID", "Related_Project_ID", "Is_MultiPhase",
+    # geography
+    "Municipality", "County", "Postal_Code",
+    # money
+    "Exemption_School", "Exemption_County", "Exemption_City", "Exemption_Total",
+    "PILOT_School", "PILOT_County", "PILOT_City", "PILOT_Total",
     "State_Award_Total", "Net_Benefit",
-    # Layer 2 · Compliance & Jobs
-    "Jobs_Plan_Total", "Jobs_Created_ToDate", "Average_Salary", "Measurement_Year",
-    # Layer 3 · Geography
-    "Municipality", "County", "State", "Postal_Code",
-    # Layer 4 · Metadata / IDs
-    "Source_Sheet", "Authority_Name", "Program_Name", "Project_ID",
-    "Related_Project_ID", "Is_MultiPhase", "Project_Name", "Industry",
-    "Board_Approval_Date", "Agreement_Execution_Date", "Project_Start_Date",
-    "Project_Completion_Date", "Benefit_End_Date", "Project_Description", "Notes",
+    # jobs
+    "Jobs_Plan_Total", "Jobs_Created_ToDate",
+    # dates
+    "Board_Approval_Date",
 ]
 
-# Exhaustive header map (variant → canonical)
-HEADER_MAP = {
-    # IDs & meta
-    "Project_ID": ["Project ID", "Record ID", "Project Identifier", "Report Record ID"],
-    "Related_Project_ID": ["Parent Project ID", "Prior Project #", "Related Project Number", "Multi-Phase Project ID"],
-    "Authority_Name": ["Lead Agency Name", "Authority Name"],
-    "Program_Name": ["Program through which the funding was awarded"],
-    # Geography
-    "Municipality": ["City/Town", "Municipality", "Project City", "Recipient City"],
-    "County": ["County", "Project County", "Recipient County"],
-    "Postal_Code": ["Zip", "Zip Code", "Postal Code"],
-    "State": ["State"],
-    # Financials – exemptions & PILOTs
-    "Exemption_School": ["School District Exemption", "School Tax Abated"],
-    "Exemption_County": ["County Exemption", "County Tax Abated"],
-    "Exemption_City": ["City/Town Exemption", "City Tax Abated"],
-    "PILOT_School": ["School PILOT Payments Scheduled", "School PILOT"],
-    "PILOT_County": ["County PILOT Payments Scheduled", "County PILOT"],
-    "PILOT_City": ["City PILOT Payments Scheduled", "City PILOT"],
-    "State_Award": [
-        "Assistance Amount", "Tax Credit Amount", "Grant Award", "Capital Grant Amount",
-        "Empire State Jobs Retention Credit",
-    ],
-    # Jobs & salary
-    "Jobs_Plan_Total": ["Jobs Planned", "Jobs to be Created", "Employment Target"],
-    "Jobs_Created_ToDate": ["Jobs Created", "FTEs Reported"],
-    "Average_Salary": ["Average Salary", "Avg Annual Wage"],
-    # Dates
-    "Board_Approval_Date": ["Board Approval Date", "Date Approved"],
-    "Agreement_Execution_Date": ["Agreement Execution Date"],
-    "Project_Start_Date": ["Project Start Date", "Construction Start"],
-    "Project_Completion_Date": ["Project Completion Date", "Construction Completion"],
-    "Benefit_End_Date": ["Benefit End Date", "Exemption End Date"],
-    "Measurement_Year": ["Fiscal Year", "Reporting Year"],
-    # Narrative
-    "Project_Name": ["Project Title", "Name of Project", "Project"],
-    "Industry": ["Industry"],
-    "Project_Description": ["Project Description", "Description"],
-    "Notes": ["Notes", "Comments"],
-}
-
-# Assistance‑type inference map (label → column list that triggers it)
-ASSIST_TYPE_MAP = {
-    "Grant": ["Grant Award", "Assistance Amount"],
-    "Tax Credit": ["Tax Credit Amount", "Empire State Jobs Retention Credit"],
-    "Exemption": ["Exemption_School", "Exemption_County", "Exemption_City"],
-    "PILOT": ["PILOT_School", "PILOT_County", "PILOT_City"],
-}
-
-# ------------------------------------------------------------------
-# Helper functions
-# ------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
 
 def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename variants, co‑fill into canonical cols, drop empties."""
+    """Rename & co‑fill variant headers → canonical; derive totals."""
     df.columns = df.columns.str.strip()
-    # 1 Rename / co‑fill
+
+    # Rename / co‑fill variants
     for canon, variants in HEADER_MAP.items():
         for v in variants:
             if v in df.columns:
@@ -112,38 +97,36 @@ def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
                     df[canon] = df[canon].fillna(df[v])
                     df.drop(columns=v, inplace=True)
 
-    # 2 Ensure all canonical cols exist
-    for c in HEADER_MAP.keys():
+    # Derive Is_MultiPhase boolean
+    if "Related_Project_ID" not in df.columns:
+        df["Related_Project_ID"] = pd.NA
+    df["Is_MultiPhase"] = df["Related_Project_ID"].notna()
+
+    # Ensure numeric columns exist for totals
+    for c in [
+        "Exemption_School", "Exemption_County", "Exemption_City",
+        "PILOT_School", "PILOT_County", "PILOT_City", "State_Award",
+    ]:
         if c not in df.columns:
-            df[c] = pd.NA
+            df[c] = 0
 
-    # 3 Totals & derived fields
-    tax_cols = ["Exemption_School", "Exemption_County", "Exemption_City"]
-    pilot_cols = ["PILOT_School", "PILOT_County", "PILOT_City"]
-
-    df["Exemption_Total"] = df[tax_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
-    df["PILOT_Total"] = df[pilot_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+    # Compute totals
+    df["Exemption_Total"] = pd.to_numeric(
+        df[["Exemption_School", "Exemption_County", "Exemption_City"]].sum(axis=1), errors="coerce"
+    ).fillna(0)
+    df["PILOT_Total"] = pd.to_numeric(
+        df[["PILOT_School", "PILOT_County", "PILOT_City"]].sum(axis=1), errors="coerce"
+    ).fillna(0)
     df["State_Award_Total"] = pd.to_numeric(df["State_Award"], errors="coerce").fillna(0)
     df["Net_Benefit"] = df["Exemption_Total"] + df["State_Award_Total"] - df["PILOT_Total"]
 
-    # 4 Assistance type inference
-    for label, cols in ASSIST_TYPE_MAP.items():
-        for c in cols:
-            if c in df.columns and df[c].notna().any():
-                df.loc[df[c].notna(), "Assistance_Type"] = label
-
-    # 5 Multi‑phase flag
-    df["Is_MultiPhase"] = df["Related_Project_ID"].notna()
-
-    # 6 Drop all‑blank cols & de‑dupe
+    # Drop empty columns and duplicates
     df.dropna(axis=1, how="all", inplace=True)
     df = df.loc[:, ~df.columns.duplicated()].copy()
-
     return df
 
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
-    """Load every sheet in the workbook, harmonise, concat."""
     xls = pd.ExcelFile(path, engine="openpyxl")
     frames = []
     for sheet in xls.sheet_names:
@@ -152,11 +135,42 @@ def load_data(path: str) -> pd.DataFrame:
         frames.append(harmonise_columns(df))
     return pd.concat(frames, ignore_index=True)
 
-# Streamlit utils ----------------------------------------------------
-
+# Helper to show only curated columns
 def curate(df: pd.DataFrame) -> pd.DataFrame:
-    ordered = [c for c in PREFERRED_ORDER if c in df.columns] + [c for c in df.columns if c not in PREFERRED_ORDER]
-    return df[ordered]
+    cols = [c for c in PREFERRED_ORDER if c in df.columns]
+    return df[cols]
+
+# --- Data load ---
+with st.spinner("Loading workbook …"):
+    data = load_data(WORKBOOK)
+
+# --- Sidebar controls ---
+st.sidebar.header("Search controls")
+terms = st.sidebar.multiselect("Synonyms / code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
+new_term = st.sidebar.text_input("Add term").strip()
+if new_term:
+    terms.append(new_term)
+regex_mode = st.sidebar.checkbox("Regex mode", value=False)
+
+# --- Search ---
+obj_cols = data.select_dtypes("object").columns
+if regex_mode:
+    pattern = "|".join(terms)
+    mask = data[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(axis=1)
+else:
+    t_lower = [t.lower() for t in terms]
+    mask = data[obj_cols].apply(lambda s: s.str.lower().fillna("").apply(lambda x: any(t in x for t in t_lower))).any(axis=1)
+filtered = data[mask]
+
+# --- KPIs ---
+col1, col2 = st.columns(2)
+col1.metric("Matched rows", len(filtered))
+col2.metric("Net Benefit (Σ)", f"US$ {filtered['Net_Benefit'].sum():,.0f}")
+
+# --- Table ---
+st.dataframe(curate(filtered), use_container_width=True)
+
+# --- Download ---
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
@@ -165,35 +179,12 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         writer.book.worksheets[0].freeze_panes = "A2"
     return bio.getvalue()
 
-# ------------------------------------------------------------------
-# UI
-# ------------------------------------------------------------------
-with st.spinner("Loading workbook …"):
-    DATA = load_data(WORKBOOK)
+st.download_button(
+    "Download filtered rows (Excel)",
+    data=to_excel_bytes(filtered),
+    file_name="IBM_Assistance_clean.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
-st.sidebar.header("Search Controls")
-terms = st.sidebar.multiselect("Synonyms / Code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
-new_term = st.sidebar.text_input("Add term").strip()
-if new_term:
-    terms.append(new_term)
-regex_mode = st.sidebar.checkbox("Regex mode (advanced)")
-
-# -- Search
-obj_cols = DATA.select_dtypes("object").columns
-if regex_mode:
-    pattern = "|".join(terms) if terms else "^$"
-    mask = DATA[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(axis=1)
-else:
-    lowered = [t.lower() for t in terms]
-    mask = DATA[obj_cols].apply(lambda s: s.str.lower().fillna("").apply(lambda x: any(t in x for t in lowered))).any(axis=1)
-filtered = DATA[mask]
-
-# -- Metrics
-col_a, col_b = st.columns(2)
-col_a.metric("Matched rows", len(filtered))
-col_b.metric("Net Benefit (Σ)", f"US$ {filtered['Net_Benefit'].fillna(0).sum():,.0f}")
-
-# -- Data table
-st.dataframe(curate(filtered), use_container_width=True)
-
-# -- Download
+# --- Footer ---
+st.markdown("""---\n*Toggle regex mode for advanced pattern matching.*""")
