@@ -1,10 +1,7 @@
-"""app.py – IBM × CBRE Incentive Finder (REV‑I, **stable**)
+"""app.py – IBM × CBRE Incentive Finder (REV‑I‑patch1)
 ================================================================
-• Two‑sheet workbook (`ny_incentives_3.xlsx`) – ESD + IDA only
-• Hero banner, chip filters (`streamlit_tags`), KPI cards.
-• No harmonisation: table shows native columns, so no KeyErrors.
-• Word‑boundary search fixes “kibm”.
-• Guards for missing columns in KPI math.
+Bug‑fix: KPI calculations returned pandas Series, causing `Series is ambiguous`
+ValueError inside `fmt_dollar`. We now aggregate to scalars with `.sum()`.
 """
 
 import re
@@ -19,8 +16,7 @@ from streamlit_tags import st_tags
 # Config & constants
 # ------------------------------------------------------------------
 WORKBOOK = "ny_incentives_3.xlsx"
-possible_workbook_path = Path(WORKBOOK)
-assert possible_workbook_path.exists(), f"{WORKBOOK} not found in repo"
+assert Path(WORKBOOK).exists(), f"{WORKBOOK} not found in repo"
 
 FRIENDLY_NAMES = {
     0: "ESD State Incentives",
@@ -43,44 +39,52 @@ def filter_terms(df: pd.DataFrame, terms: list[str]) -> pd.DataFrame:
     obj_cols = df.select_dtypes(include="object").columns
     pattern = r"\\b(" + "|".join(re.escape(t) for t in terms) + r")\\b"
     contains = df[obj_cols].apply(lambda col: col.str.contains(pattern, case=False, na=False, regex=True))
-    mask = contains.any(axis=1)
-    return df[mask]
+    return df[contains.any(axis=1)]
 
 
-def to_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series.str.replace(",", ""), errors="coerce").fillna(0)
+def to_numeric_col(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return numeric column (floats); 0 if column missing."""
+    if col not in df.columns:
+        return pd.Series([0])
+    return pd.to_numeric(df[col].str.replace(",", ""), errors="coerce").fillna(0)
 
 
 def kpi_totals(df: pd.DataFrame) -> dict[str, float]:
-    res = {}
-    res["approvals"] = len(df)
+    """Compute sheet‑aware KPI sums and return scalars."""
+    res = {
+        "approvals": float(len(df)),
+        "state_val": 0.0,
+        "local_val": 0.0,
+        "capex": 0.0,
+        "jobs": 0.0,
+    }
 
-    # State value
-    state_cols = [
-        "Total NYS Investment",  # ESD
-        "State Sales Tax Exemption Amount",  # IDA
-    ]
-    res["state_val"] = sum(to_numeric(df[c]) for c in state_cols if c in df.columns)
+    # --- State value ---
+    res["state_val"] = (
+        to_numeric_col(df, "Total NYS Investment").sum()
+        + to_numeric_col(df, "State Sales Tax Exemption Amount").sum()
+    )
 
-    # Local value (IDA only)
+    # --- Local value (IDA only) ---
     if {"Total Exemptions", "State Sales Tax Exemption Amount"}.issubset(df.columns):
-        res["local_val"] = (to_numeric(df["Total Exemptions"]) - to_numeric(df["State Sales Tax Exemption Amount"]) ).sum()
-    else:
-        res["local_val"] = 0
+        local_series = (
+            to_numeric_col(df, "Total Exemptions")
+            - to_numeric_col(df, "State Sales Tax Exemption Amount")
+        )
+        res["local_val"] = local_series.sum()
 
-    # CapEx
-    capex_cols = [
-        "Total Public-Private Investment",  # ESD
-        "Total Project Amount",  # IDA
-    ]
-    res["capex"] = sum(to_numeric(df[c]) for c in capex_cols if c in df.columns)
+    # --- CapEx ---
+    res["capex"] = (
+        to_numeric_col(df, "Total Public-Private Investment").sum()
+        + to_numeric_col(df, "Total Project Amount").sum()
+    )
 
-    # New jobs / FTEs
-    job_cols = [
-        "Job Creation Commitments (FTEs)",  # ESD
-        "Original Estimate Of Jobs To Be Created",  # IDA
-    ]
-    res["jobs"] = sum(to_numeric(df[c]) for c in job_cols if c in df.columns)
+    # --- Jobs / FTEs ---
+    res["jobs"] = (
+        to_numeric_col(df, "Job Creation Commitments (FTEs)").sum()
+        + to_numeric_col(df, "Original Estimate Of Jobs To Be Created").sum()
+    )
+
     return res
 
 
@@ -111,17 +115,17 @@ with st.spinner("Loading workbook …"):
     DATA = load_sheets(WORKBOOK)
 
 RAW_NAMES = list(DATA.keys())[:2]
-display_options = [FRIENDLY_NAMES.get(i, n) for i, n in enumerate(RAW_NAMES)] + ["All Sheets"]
+DISPLAY_OPTS = [FRIENDLY_NAMES.get(i, n) for i, n in enumerate(RAW_NAMES)] + ["All Sheets"]
 
 # Sidebar filters -------------------------------------------------------------
 st.sidebar.subheader("Add or remove terms")
 terms_chips = st_tags(label="", text="Press enter to add", value=DEFAULT_TERMS, suggestions=[], maxtags=10)
 
-sheet_display = st.sidebar.radio("Choose data view", display_options, index=len(display_options)-1)
+sheet_display = st.sidebar.radio("Choose data view", DISPLAY_OPTS, index=len(DISPLAY_OPTS)-1)
 if sheet_display == "All Sheets":
     current_df = pd.concat(DATA.values(), keys=RAW_NAMES, names=["Source_Sheet"]).reset_index(level=0)
 else:
-    raw_name = RAW_NAMES[display_options.index(sheet_display)]
+    raw_name = RAW_NAMES[DISPLAY_OPTS.index(sheet_display)]
     current_df = DATA[raw_name].copy()
 
 # Filter by terms -------------------------------------------------------------
