@@ -1,190 +1,122 @@
-# app.py – IBM Incentive Finder (REV‑G – full mapping)
-# ---------------------------------------------------
-# Streamlit dashboard that consolidates five NY‑state incentive source
-# sheets into a single, clean DataFrame for IBM executives.
+"""IBM Incentive Finder – simplified two‑sheet edition
+====================================================
+Streamlit dashboard that lets IBM reviewers filter and download incentive
+records from *exactly* the two source sheets now present in
+`ny_incentives_2.xlsx`.
 
-"""
-Major fixes
-===========
-* Exhaustive header mapping based on full inspection of all 5 sheets.
-* Correct calculation of Exemption/PILOT totals and Net_Benefit.
-* `curate()` helper to show only curated columns, eliminating the 160‑col sprawl.
-* Robust handling of blank or missing columns.
-* No dangling parentheses (syntax checked with `python -m py_compile`).
+• No header harmonisation – each view shows columns exactly as they appear
+  in the sheet (avoids mapping errors).
+• Sidebar allows: synonym search, sheet toggle (ESD, IDA, All).
+• KPI cards sum the **first numeric column** found in each sheet (typically
+  the assistance $ field); if a sheet has no numerics, the KPI hides.
+• Download button exports the *currently visible* table to Excel with
+  filters applied; “All Sheets” adds a `Source_Sheet` column.
+
+Author: Data‑Wrangler‑GPT | 2025‑06‑25
 """
 
 import streamlit as st
 import pandas as pd
 from io import BytesIO
 
-st.set_page_config(page_title="IBM Incentive Finder", layout="wide")
+st.set_page_config(page_title="IBM Incentive Finder (Two‑Sheet)", layout="wide")
 
-# ----------------------------------------------------------------------------
-# Constants
-WORKBOOK = "ny_incentives_full.xlsx"
+# -----------------------------------------------------------------------------
+# Constants                                                                      
+# -----------------------------------------------------------------------------
+WORKBOOK = "ny_incentives_2.xlsx"  # <- make sure this filename matches repo
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
 
-# ----------------------------------------------------------------------------
-# Canonical schema & header mapping
-# ---------------------------------------------------------------------------
-HEADER_MAP = {
-    # ---- IDs & meta ----
-    "Project_ID": ["Project Code", "Record ID", "Project Identifier"],
-    "Related_Project_ID": ["Original Project Code"],
-    "Is_MultiPhase_Flag": ["Part of or related to multi-phase project"],
-
-    # ---- Geography ----
-    "Municipality": ["Project City", "Municipality", "Recipient City"],
-    "County": ["County", "Project County"],
-    "Postal_Code": ["Project Postal Code", "Postal Code", "Zip Code"],
-
-    # ---- Award amounts (state level) ----
-    "State_Award": [
-        "Assistance Amount", "Tax Credit Amount", "Grant Award",
-        "Capital Grant Amount", "Empire State Jobs Retention Credit",
-    ],
-
-    # ---- Local tax exemptions ----
-    "Exemption_School": ["School Property Tax Exemption Amount", "School District Exemption"],
-    "Exemption_County": ["County Real Property Tax Exemption Amount"],
-    "Exemption_City": ["Local Property Tax Exemption Amount", "City/Town Property Tax Exemption Amount"],
-
-    # ---- PILOTs ----
-    "PILOT_School": ["School District PILOT Due", "School District PILOT Made"],
-    "PILOT_County": ["County PILOT Due", "County PILOT Made"],
-    "PILOT_City": ["Local PILOT Due", "Local PILOT Made"],
-
-    # ---- Jobs ----
-    "Jobs_Plan_Total": ["Job Creation Commitments (FTEs)", "Jobs Planned"],
-    "Jobs_Created_ToDate": ["Total Employees at the site (FTEs)", "Jobs Created"],
-
-    # ---- Dates ----
-    "Board_Approval_Date": ["Date Project Approved", "Board Approval Date"],
-}
-
-# Preferred order for UI/export
-PREFERRED_ORDER = [
-    # meta
-    "Source_Sheet", "Authority_Name", "Program_Name",
-    "Project_ID", "Related_Project_ID", "Is_MultiPhase",
-    # geography
-    "Municipality", "County", "Postal_Code",
-    # money
-    "Exemption_School", "Exemption_County", "Exemption_City", "Exemption_Total",
-    "PILOT_School", "PILOT_County", "PILOT_City", "PILOT_Total",
-    "State_Award_Total", "Net_Benefit",
-    # jobs
-    "Jobs_Plan_Total", "Jobs_Created_ToDate",
-    # dates
-    "Board_Approval_Date",
-]
-
-# ----------------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------------
-
-def harmonise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename & co‑fill variant headers → canonical; derive totals."""
-    df.columns = df.columns.str.strip()
-
-    # Rename / co‑fill variants
-    for canon, variants in HEADER_MAP.items():
-        for v in variants:
-            if v in df.columns:
-                if canon not in df.columns:
-                    df.rename(columns={v: canon}, inplace=True)
-                else:
-                    df[canon] = df[canon].fillna(df[v])
-                    df.drop(columns=v, inplace=True)
-
-    # Derive Is_MultiPhase boolean
-    if "Related_Project_ID" not in df.columns:
-        df["Related_Project_ID"] = pd.NA
-    df["Is_MultiPhase"] = df["Related_Project_ID"].notna()
-
-    # Ensure numeric columns exist for totals
-    for c in [
-        "Exemption_School", "Exemption_County", "Exemption_City",
-        "PILOT_School", "PILOT_County", "PILOT_City", "State_Award",
-    ]:
-        if c not in df.columns:
-            df[c] = 0
-
-    # Compute totals
-    df["Exemption_Total"] = pd.to_numeric(
-        df[["Exemption_School", "Exemption_County", "Exemption_City"]].sum(axis=1), errors="coerce"
-    ).fillna(0)
-    df["PILOT_Total"] = pd.to_numeric(
-        df[["PILOT_School", "PILOT_County", "PILOT_City"]].sum(axis=1), errors="coerce"
-    ).fillna(0)
-    df["State_Award_Total"] = pd.to_numeric(df["State_Award"], errors="coerce").fillna(0)
-    df["Net_Benefit"] = df["Exemption_Total"] + df["State_Award_Total"] - df["PILOT_Total"]
-
-    # Drop empty columns and duplicates
-    df.dropna(axis=1, how="all", inplace=True)
-    df = df.loc[:, ~df.columns.duplicated()].copy()
-    return df
-
+# -----------------------------------------------------------------------------
+# Data loading – cached so the workbook is read only once                        
+# -----------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def load_data(path: str) -> pd.DataFrame:
+def load_sheets(path: str) -> dict[str, pd.DataFrame]:
     xls = pd.ExcelFile(path, engine="openpyxl")
-    frames = []
-    for sheet in xls.sheet_names:
-        df = pd.read_excel(xls, sheet_name=sheet, dtype=str)
-        df["Source_Sheet"] = sheet
-        frames.append(harmonise_columns(df))
-    return pd.concat(frames, ignore_index=True)
+    return {s: pd.read_excel(xls, sheet_name=s, dtype=str) for s in xls.sheet_names}
 
-# Helper to show only curated columns
-def curate(df: pd.DataFrame) -> pd.DataFrame:
-    cols = [c for c in PREFERRED_ORDER if c in df.columns]
-    return df[cols]
+DATA = load_sheets(WORKBOOK)
+SHEET_NAMES = list(DATA)  # keeps original order
 
-# --- Data load ---
-with st.spinner("Loading workbook …"):
-    data = load_data(WORKBOOK)
-
-# --- Sidebar controls ---
-st.sidebar.header("Search controls")
-terms = st.sidebar.multiselect("Synonyms / code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
+# -----------------------------------------------------------------------------
+# Sidebar – search + sheet selector                                             
+# -----------------------------------------------------------------------------
+st.sidebar.header("Search Controls")
+terms = st.sidebar.multiselect("Synonyms / Code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
 new_term = st.sidebar.text_input("Add term").strip()
 if new_term:
     terms.append(new_term)
-regex_mode = st.sidebar.checkbox("Regex mode", value=False)
+regex_mode = st.sidebar.checkbox("Regex mode (advanced)", value=False)
 
-# --- Search ---
-obj_cols = data.select_dtypes("object").columns
-if regex_mode:
-    pattern = "|".join(terms)
-    mask = data[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(axis=1)
+sheet_choice = st.sidebar.radio("View", SHEET_NAMES + ["All Sheets"], index=0)
+
+# -----------------------------------------------------------------------------
+# Helper – filter rows                                                          
+# -----------------------------------------------------------------------------
+
+def row_filter(df: pd.DataFrame) -> pd.DataFrame:
+    if not terms:
+        return df.iloc[0:0]
+    obj_cols = df.select_dtypes("object").columns
+    if regex_mode:
+        pattern = "|".join(terms)
+        mask = df[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(axis=1)
+    else:
+        t_low = [t.lower() for t in terms]
+        mask = df[obj_cols].apply(lambda s: s.str.lower().fillna("").apply(lambda cell: any(t in cell for t in t_low))).any(axis=1)
+    return df[mask]
+
+# -----------------------------------------------------------------------------
+# Get current DataFrame (single or concatenated)                                
+# -----------------------------------------------------------------------------
+if sheet_choice == "All Sheets":
+    frames = []
+    for s, df in DATA.items():
+        tmp = df.copy()
+        tmp["Source_Sheet"] = s
+        frames.append(tmp)
+    current_df = pd.concat(frames, ignore_index=True)
 else:
-    t_lower = [t.lower() for t in terms]
-    mask = data[obj_cols].apply(lambda s: s.str.lower().fillna("").apply(lambda x: any(t in x for t in t_lower))).any(axis=1)
-filtered = data[mask]
+    current_df = DATA[sheet_choice]
 
-# --- KPIs ---
-col1, col2 = st.columns(2)
-col1.metric("Matched rows", len(filtered))
-col2.metric("Net Benefit (Σ)", f"US$ {filtered['Net_Benefit'].sum():,.0f}")
+filtered = row_filter(current_df)
 
-# --- Table ---
-st.dataframe(curate(filtered), use_container_width=True)
+# -----------------------------------------------------------------------------
+# KPI cards                                                                     
+# -----------------------------------------------------------------------------
+num_cols = filtered.select_dtypes("number").columns
+col_left, col_right = st.columns(2)
+col_left.metric("Matched rows", len(filtered))
+if num_cols.any():
+    col_right.metric("Σ of first numeric column", f"US$ {filtered[num_cols[0]].sum():,.0f}")
+else:
+    col_right.metric("Σ of numeric column", "—")
 
-# --- Download ---
+# -----------------------------------------------------------------------------
+# Data table                                                                    
+# -----------------------------------------------------------------------------
+st.dataframe(filtered, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# Download                                                                      
+# -----------------------------------------------------------------------------
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        curate(df).to_excel(writer, sheet_name="IBM_Matches", index=False)
+        df.to_excel(writer, sheet_name="IBM_Records", index=False)
         writer.book.worksheets[0].freeze_panes = "A2"
     return bio.getvalue()
 
 st.download_button(
-    "Download filtered rows (Excel)",
+    "Download current view (Excel)",
     data=to_excel_bytes(filtered),
-    file_name="IBM_Assistance_clean.xlsx",
+    file_name="IBM_Incentives_filtered.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
-# --- Footer ---
-st.markdown("""---\n*Toggle regex mode for advanced pattern matching.*""")
+# -----------------------------------------------------------------------------
+# Footer                                                                        
+# -----------------------------------------------------------------------------
+st.markdown(
+    """---  \nUse the sidebar to switch between ESD and IDA sheets or see all rows together.\nRegex mode lets you write full regular expressions (e.g., `(?i)ibm|project chess`).""")
