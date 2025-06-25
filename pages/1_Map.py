@@ -15,7 +15,7 @@ pdk.settings.mapbox_api_key = TOKEN
 
 # ─── Load data --------------------------------------------------------------
 DATA = load_data()
-RAW_NAMES = list(DATA.keys())[:2]  # first two sheets only
+RAW_NAMES = list(DATA.keys())[:2]  # assume first two sheets
 DISPLAY = {
     "ESD": "Empire State Development Incentives",
     "IDA": "Municipal IDA Incentives",
@@ -27,42 +27,52 @@ sheet_display = st.sidebar.radio(
     index=2,
 )
 
-# translate friendly → DataFrame
+# translate to DataFrame
 if sheet_display == "State & Local Combined":
     df = pd.concat(DATA.values(), keys=RAW_NAMES, names=["Source_Sheet"])
 else:
     idx = 0 if sheet_display.startswith("Empire") else 1
     df = DATA[RAW_NAMES[idx]].copy()
 
-# ─── County filter (if column exists) --------------------------------------
+# ─── sidebar county filter --------------------------------------------------
 if "County" in df.columns:
-    county_opts = sorted(df["County"].dropna().unique())
-    chosen = st.sidebar.multiselect("County", county_opts, default=county_opts)
+    counties = sorted(df["County"].dropna().unique())
+    chosen = st.sidebar.multiselect("County", counties, default=counties)
     df = df[df["County"].isin(chosen)]
 
-# ─── Numeric $ column + bubble radius --------------------------------------
+# ─── numeric $ column + radius ---------------------------------------------
 num_col = (
-    "Total NYS Investment" if "Total NYS Investment" in df.columns else "Total Exemptions"
+    "Total NYS Investment"
+    if "Total NYS Investment" in df.columns
+    else "Total Exemptions"
 )
-df["$"] = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
-df["_radius"] = df["$"] .clip(lower=1) * 2  # simple scaling
 
-# ─── Geo‑prep --------------------------------------------------------------
-# 1) ZIP column?
-zip_col = next((c for c in ["Postal Code", "ZIP", "Zip Code", "Zip"] if c in df.columns), None)
+df["$"] = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
+df["_radius"] = df["$"] .clip(lower=1) * 2  # ensure visible bubbles
+
+# ─── Geo‑prep: ZIP first, then County centroids -----------------------------
+zip_col = None
+for cand in [
+    "Postal Code",
+    "Project Postal Code",  # newly added header variant
+    "ZIP",
+    "Zip Code",
+    "Zip",
+]:
+    if cand in df.columns:
+        zip_col = cand
+        break
 
 if zip_col is not None:
-    # quick lookup (demo only)
+    # tiny hard‑coded demo lookup
     lut = {
-        "10001": (40.7506, -73.9972),  # NYC
-        "14604": (43.1566, -77.6088),  # Rochester
+        "10001": (40.7506, -73.9972),
+        "14604": (43.1566, -77.6088),
     }
     coords = df[zip_col].map(lut)
     df["lat"] = coords.str[0]
     df["lon"] = coords.str[1]
-
 elif "County" in df.columns:
-    # 2) county centroid fallback
     county_lut = {
         "Albany": (42.6526, -73.7562),
         "Monroe": (43.1610, -77.6109),
@@ -70,18 +80,17 @@ elif "County" in df.columns:
     coords = df["County"].map(county_lut)
     df["lat"] = coords.str[0]
     df["lon"] = coords.str[1]
-
 else:
-    st.warning("No ZIP or County column to geocode; cannot build map")
+    st.warning("No ZIP or County column to geocode.")
     st.stop()
 
-# drop rows lacking lat/lon
+# Drop rows without coords
 df = df.dropna(subset=["lat", "lon"])
 if df.empty:
-    st.warning("No geodata available for the selected sheet / filter.")
+    st.warning("No geodata available for the selected sheet/filter.")
     st.stop()
 
-# ─── PyDeck layer -----------------------------------------------------------
+# ─── Build map --------------------------------------------------------------
 layer = pdk.Layer(
     "ScatterplotLayer",
     data=df,
@@ -89,7 +98,7 @@ layer = pdk.Layer(
     get_radius="_radius",
     radius_scale=20,
     radius_min_pixels=4,
-    get_fill_color=[0, 122, 62, 160],  # CBRE green
+    get_fill_color=[0, 122, 62, 160],
     pickable=True,
 )
 view = pdk.ViewState(latitude=42.8, longitude=-75.5, zoom=5.3)
@@ -103,4 +112,4 @@ st.pydeck_chart(
     )
 )
 
-st.caption("Bubble radius ∝ incentive $. Use sidebar to change sheet or county.")
+st.caption("Bubble radius ∝ incentive $.  Use sidebar to change sheet or county.")
