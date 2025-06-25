@@ -1,191 +1,178 @@
-"""app.py – IBM Incentive Finder (Phase‑0 UI Refresh)
-====================================================
-*Hero banner  + KPI cards  + Filter chips*
+"""app.py – IBM Incentive Finder (REV‑H)
+=================================================
+Phase‑0 polish: hero banner, chip filters, KPI cards, and strict IBM match.
 
-Assumes workbook `ny_incentives_2.xlsx` with sheets `ESD Data Export …` and
-`IDA Data Export …` is present in the repo.
+Requires:
+    pip install streamlit streamlit-tags openpyxl pandas
+
+Workbook expected: ny_incentives_2.xlsx with two sheets:
+    • ESD Data Export – 4.17.25
+    • IDA Data Export – 2.7.25
 """
 
-import streamlit as st
-import pandas as pd
-from io import BytesIO
+import re
 from pathlib import Path
+from io import BytesIO
 
-# ----------------------------------------------------------------------------
-# CONFIG
-# ----------------------------------------------------------------------------
-WORKBOOK = "ny_incentives_2.xlsx"  # replace if the filename changes
-DEFAULT_TERMS = ["IBM", "International Business Machines"]
+import pandas as pd
+import streamlit as st
+from streamlit_tags import st_tags
 
-# Brand colours
-IBM_BLUE = "#0033FF"
-CBRE_GREEN = "#007A3E"
-BG_GRADIENT = "linear-gradient(90deg, rgba(0,51,255,0.35) 0%, rgba(0,122,62,0.35) 100%)"
+# ---------------------------------------------------------------------
+# Page & brand setup
+# ---------------------------------------------------------------------
+st.set_page_config(page_title="IBM×CBRE Incentive Finder", layout="wide")
+BRAND_BLUE = "#0033FF"
+BRAND_GREEN = "#007A3E"
 
-st.set_page_config(page_title="IBM × CBRE | NY Incentives", layout="wide")
+# Hero banner with subtle animated SVG background (thin circuit lines)
+HERO_SVG = f"""
+<svg width='0' height='0'>
+  <defs>
+    <pattern id='circuit' width='120' height='120' patternUnits='userSpaceOnUse'>
+      <path d='M0 60 H120 M60 0 V120' stroke='{BRAND_GREEN}' stroke-width='0.3'/>
+    </pattern>
+  </defs>
+</svg>
+<div style='position:relative;width:100%;padding:32px 0;background:linear-gradient(135deg,{BRAND_BLUE} 0%,#0D0D3B 100%);'>
+  <div style='position:absolute;inset:0;opacity:0.12;background:url("#circuit");'></div>
+  <h1 style='position:relative;color:white;font-family:"IBM Plex Sans",sans-serif;font-size:2rem;margin:0 0 4px 32px;'>IBM × CBRE Incentive Finder</h1>
+  <p style='position:relative;color:#E0E0E0;margin:0 0 0 32px;'>Real‑time lens on every New York incentive powering IBM’s growth.</p>
+</div>"""
 
-# Inject lightweight CSS for hero + chips -------------------------------------------------
-st.markdown(
-    f"""
-    <style>
-    /* hero */
-    .hero {{
-        background: {BG_GRADIENT};
-        padding: 1.5rem 2rem;
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        gap: 1.2rem;
-        margin-bottom: 1.2rem;
-        color: white;
-    }}
-    .hero img {{ height: 40px; }}
-    /* chip */
-    .stMultiSelect [data-baseweb="tag"] {{
-        background:{IBM_BLUE}22;
-        border: 1px solid {IBM_BLUE}66;
-        color: white;
-    }}
-    .stMultiSelect [data-baseweb="tag"]:hover {{ background:{IBM_BLUE}44; }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.components.v1.html(HERO_SVG, height=140)
 
-# ----------------------------------------------------------------------------
-# Data utilities
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Load workbook (cached)
+# ---------------------------------------------------------------------
+WORKBOOK = "ny_incentives_2.xlsx"
+
 @st.cache_data(show_spinner=False)
-def load_workbook(path: str) -> dict[str, pd.DataFrame]:
-    """Return dict of sheet_name -> DataFrame (all cols as text)"""
+def load_sheets(path: str):
     xls = pd.ExcelFile(path, engine="openpyxl")
     return {s: pd.read_excel(xls, sheet_name=s, dtype=str) for s in xls.sheet_names}
 
-def filter_rows(df: pd.DataFrame, terms: list[str], regex: bool = False) -> pd.DataFrame:
+data_dict = load_sheets(WORKBOOK)
+
+# ---------------------------------------------------------------------
+# Helper: word‑boundary search (avoids 'kibm')
+# ---------------------------------------------------------------------
+
+def filter_terms(df: pd.DataFrame, terms: list[str]):
     if not terms:
         return df.iloc[0:0]
-    obj_cols = df.select_dtypes(include="object").columns
-    if regex:
-        pat = "|".join(terms)
-        mask = df[obj_cols].apply(lambda s: s.str.contains(pat, case=False, na=False, regex=True)).any(axis=1)
-    else:
-        terms_lower = [t.lower() for t in terms]
-        mask = df[obj_cols].apply(lambda s: s.str.lower().fillna("").apply(lambda x: any(t in x for t in terms_lower))).any(axis=1)
+    pattern = r"\\b(" + "|".join(map(re.escape, terms)) + r")\\b"
+    obj_cols = df.select_dtypes("object").columns
+    mask = df[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(axis=1)
     return df[mask]
 
-def sum_numeric(df: pd.DataFrame) -> float:
-    num = df.select_dtypes(include="number")
-    if num.empty:
-        return 0.0
-    return float(num.sum(axis=1).sum())
+# ---------------------------------------------------------------------
+# Sidebar – chips for synonyms and sheet selector
+# ---------------------------------------------------------------------
+st.sidebar.subheader("Search Synonyms / Code‑names")
+DEFAULT_TERMS = ["IBM", "International Business Machines"]
+terms_chips = st_tags(
+    label="Add or remove terms",
+    text="Press enter to add",
+    value=DEFAULT_TERMS,
+    suggestions=["Project Chess", "Endicott"],
+)
 
-def to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Matches") -> bytes:
+sheet_choice = st.sidebar.radio(
+    "Choose data view",
+    [*data_dict.keys(), "All Sheets"],
+    index=len(data_dict)  # default to All Sheets
+)
+
+# Prep dataframe based on choice
+if sheet_choice == "All Sheets":
+    frames = []
+    for s, df in data_dict.items():
+        temp = df.copy()
+        temp["Source_Sheet"] = s
+        frames.append(temp)
+    current_df = pd.concat(frames, ignore_index=True)
+else:
+    current_df = data_dict[sheet_choice]
+
+filtered_df = filter_terms(current_df, terms_chips)
+
+# ---------------------------------------------------------------------
+# KPI calculations (sheet‑aware)
+# ---------------------------------------------------------------------
+
+def to_num(series):
+    return pd.to_numeric(series, errors="coerce").fillna(0)
+
+authority = "ESD" if "ESD" in sheet_choice else "IDA" if "IDA" in sheet_choice else "All"
+
+# Approvals
+kpi_approvals = len(filtered_df)
+
+# State Value
+state_val = 0.0
+if authority in ("ESD", "All") and "Total NYS Investment" in filtered_df.columns:
+    state_val += to_num(filtered_df["Total NYS Investment"]).sum()
+if authority in ("IDA", "All") and "State Sales Tax Exemption Amount" in filtered_df.columns:
+    state_val += to_num(filtered_df["State Sales Tax Exemption Amount"]).sum()
+
+# Local Value
+local_val = 0.0
+if authority in ("IDA", "All") and {
+    "Total Exemptions",
+    "State Sales Tax Exemption Amount",
+}.issubset(filtered_df.columns):
+    local_val = (to_num(filtered_df["Total Exemptions"]) - to_num(filtered_df["State Sales Tax Exemption Amount"])) .sum()
+
+# CapEx
+capex_val = 0.0
+if authority in ("ESD", "All") and "Total Public-Private Investment" in filtered_df.columns:
+    capex_val += to_num(filtered_df["Total Public-Private Investment"]).sum()
+if authority in ("IDA", "All") and "Total Project Amount" in filtered_df.columns:
+    capex_val += to_num(filtered_df["Total Project Amount"]).sum()
+
+# Jobs
+jobs_val = 0.0
+if authority in ("ESD", "All") and "Job Creation Commitments (FTEs)" in filtered_df.columns:
+    jobs_val += to_num(filtered_df["Job Creation Commitments (FTEs)"]).sum()
+if authority in ("IDA", "All") and "Original Estimate Of Jobs To Be Created" in filtered_df.columns:
+    jobs_val += to_num(filtered_df["Original Estimate Of Jobs To Be Created"]).sum()
+
+# KPI card row
+kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+kpi1.metric("# Incentive Approvals", f"{kpi_approvals}")
+kpi2.metric("Total State Value ($)", f"{state_val:,.0f}")
+kpi3.metric("Total Local Value ($)", f"{local_val:,.0f}")
+kpi4.metric("CapEx ($)", f"{capex_val:,.0f}")
+kpi5.metric("New Jobs / FTEs", f"{jobs_val:,.0f}")
+
+st.markdown("---")
+
+# ---------------------------------------------------------------------
+# Data table in native column order
+# ---------------------------------------------------------------------
+st.dataframe(filtered_df, use_container_width=True)
+
+# ---------------------------------------------------------------------
+# Download current view
+# ---------------------------------------------------------------------
+
+def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        df.to_excel(writer, sheet_name="IBM_Matches", index=False)
         writer.book.worksheets[0].freeze_panes = "A2"
     return bio.getvalue()
 
-# ----------------------------------------------------------------------------
-# Load data once
-# ----------------------------------------------------------------------------
-if not Path(WORKBOOK).exists():
-    st.error(f"Workbook '{WORKBOOK}' not found in repo.")
-    st.stop()
-
-data_dict = load_workbook(WORKBOOK)
-
-# ----------------------------------------------------------------------------
-# Sidebar – search + sheet toggle + chip filters
-# ----------------------------------------------------------------------------
-st.sidebar.header("Search Controls")
-terms = st.sidebar.multiselect("Synonyms / Code‑names", DEFAULT_TERMS, default=DEFAULT_TERMS)
-new_term = st.sidebar.text_input("Add term").strip()
-if new_term:
-    terms.append(new_term)
-regex_mode = st.sidebar.checkbox("Regex mode (advanced)")
-
-sheet_choice = st.sidebar.selectbox("Choose view", list(data_dict) + ["All Sheets"], index=len(data_dict))
-
-# Determine working DataFrame
-if sheet_choice == "All Sheets":
-    df = pd.concat([d.assign(Source_Sheet=s) for s, d in data_dict.items()], ignore_index=True)
-else:
-    df = data_dict[sheet_choice].copy()
-
-# Chip filters (dynamically populate options) ---------------------------------
-with st.sidebar.expander("Optional filters"):
-    # Authority filter
-    if "Authority_Name" in df.columns:
-        auth_opts = sorted(df["Authority_Name"].dropna().unique())
-        sel_auth = st.multiselect("Authority", auth_opts)
-        if sel_auth:
-            df = df[df["Authority_Name"].isin(sel_auth)]
-
-    # Assistance Type (if column exists)
-    if "Assistance_Type" in df.columns:
-        aid_opts = sorted(df["Assistance_Type"].dropna().unique())
-        sel_aid = st.multiselect("Assistance Type", aid_opts)
-        if sel_aid:
-            df = df[df["Assistance_Type"].isin(sel_aid)]
-
-    # County
-    if "County" in df.columns:
-        county_opts = sorted(df["County"].dropna().unique())
-        sel_county = st.multiselect("County", county_opts)
-        if sel_county:
-            df = df[df["County"].isin(sel_county)]
-
-    # Fiscal / Measurement Year
-    if "Measurement_Year" in df.columns:
-        year_opts = sorted(df["Measurement_Year"].dropna().unique())
-        sel_year = st.multiselect("Fiscal Year", year_opts)
-        if sel_year:
-            df = df[df["Measurement_Year"].isin(sel_year)]
-
-# Apply search term filter last so KPIs reflect chip filters too
-filtered = filter_rows(df, terms, regex_mode)
-
-# ----------------------------------------------------------------------------
-# Hero banner (IBM × CBRE lock‑up)
-# ----------------------------------------------------------------------------
-hero_html = f"""
-<div class='hero'>
-  <img src='https://static.wikia.nocookie.net/logopedia/images/3/3e/IBM_logo.svg' alt='IBM logo'>
-  <img src='https://upload.wikimedia.org/wikipedia/commons/4/4b/CBRE_logo.svg' alt='CBRE logo'>
-  <h2>NY Incentive Intelligence Dashboard</h2>
-</div>
-"""
-st.markdown(hero_html, unsafe_allow_html=True)
-
-# ----------------------------------------------------------------------------
-# KPI cards
-# ----------------------------------------------------------------------------
-col_left, col_right = st.columns(2)
-col_left.metric("Matched rows", len(filtered))
-
-net_benefit = sum_numeric(filtered)
-col_right.metric("Net Benefit (Σ)", f"US$ {net_benefit:,.0f}")
-
-# ----------------------------------------------------------------------------
-# Data table (native columns)
-# ----------------------------------------------------------------------------
-# If the dataset is huge, limit the default rows shown (scroll remains)
-st.dataframe(filtered, use_container_width=True, height=520)
-
-# ----------------------------------------------------------------------------
-# Download current view
-# ----------------------------------------------------------------------------
-file_name = (
-    f"IBM_{sheet_choice.replace(' ', '_')}_matches.xlsx" if sheet_choice != "All Sheets" else "IBM_AllSheets_matches.xlsx"
-)
 st.download_button(
-    "Download filtered rows (Excel)",
-    data=to_excel_bytes(filtered),
-    file_name=file_name,
+    label="Download current view (Excel)",
+    data=df_to_excel_bytes(filtered_df),
+    file_name="IBM_Incentives_filtered.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
 # Footer
-st.markdown("""<hr style='margin-top:2rem'>
-<small>IBM × CBRE Incentives Dashboard · Phase‑0 prototype</small>""", unsafe_allow_html=True)
+st.markdown(
+    """<small>Phase‑0 preview • powered by Streamlit • © 2025 CBRE & IBM</small>""",
+    unsafe_allow_html=True,
+)
