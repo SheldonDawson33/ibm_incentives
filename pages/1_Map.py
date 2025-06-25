@@ -35,7 +35,12 @@ if "County" in df.columns:
 # numeric $ column guess
 num_col = ("Total NYS Investment" if "Total NYS Investment" in df.columns
            else "Total Exemptions")
+# numeric $ column
 df["$"] = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
+
+# radius column for bubbles (min 1, double for visibility)
+df["_radius"] = df["$"].clip(lower=1) * 2
+
 
 # tiny ZIP→lat/lon lookup just for demo
 lut = {"10001": (40.7506, -73.9972), "14604": (43.1566, -77.6088)}
@@ -47,7 +52,7 @@ layer = pdk.Layer(
     "ScatterplotLayer",
     data=df,
     get_position="[lon, lat]",
-    get_radius="max($,1)*2",
+    get_radius="_radius",
     radius_scale=20,
     radius_min_pixels=4,
     get_fill_color=[0,122,62,160],
