@@ -6,109 +6,88 @@ from core import load_data
 
 st.set_page_config(page_title="IBM Incentives · Map", layout="wide")
 
-# ─── Mapbox token -----------------------------------------------------------
+# ─── Retrieve Mapbox token -------------------------------------------------
 TOKEN = os.getenv("MAPBOX_TOKEN")
-if not TOKEN:
-    st.error("⚠️ Set the MAPBOX_TOKEN environment variable in Streamlit Cloud.")
+if not TOKEN or TOKEN.startswith("pk.") is False:
+    st.error("Mapbox token missing or malformed. Add it under Settings → Secrets as\n``\nMAPBOX_TOKEN = \"pk.……\"\n``")
     st.stop()
+
 pdk.settings.mapbox_api_key = TOKEN
 
-# ─── Load data --------------------------------------------------------------
+# ─── Load data & sheet selector -------------------------------------------
 DATA = load_data()
-RAW_NAMES = list(DATA.keys())[:2]  # assume first two sheets
-DISPLAY = {
-    "ESD": "Empire State Development Incentives",
-    "IDA": "Municipal IDA Incentives",
-}
+RAW = list(DATA.keys())[:2]  # first two sheets only
+NICE = ["Empire State Development Incentives", "Municipal IDA Incentives"]
+CHOICES = NICE + ["State & Local Combined"]
+choice = st.sidebar.radio("Select sheet", CHOICES, index=2)
 
-sheet_display = st.sidebar.radio(
-    "Select sheet",
-    [DISPLAY.get("ESD"), DISPLAY.get("IDA"), "State & Local Combined"],
-    index=2,
-)
-
-# translate to DataFrame
-if sheet_display == "State & Local Combined":
-    df = pd.concat(DATA.values(), keys=RAW_NAMES, names=["Source_Sheet"])
+if choice == CHOICES[2]:
+    df = pd.concat(DATA.values(), keys=RAW, names=["Source_Sheet"])
 else:
-    idx = 0 if sheet_display.startswith("Empire") else 1
-    df = DATA[RAW_NAMES[idx]].copy()
+    idx = NICE.index(choice)
+    df = DATA[RAW[idx]].copy()
 
-# ─── sidebar county filter --------------------------------------------------
+# ─── County filter ---------------------------------------------------------
 if "County" in df.columns:
-    counties = sorted(df["County"].dropna().unique())
-    chosen = st.sidebar.multiselect("County", counties, default=counties)
-    df = df[df["County"].isin(chosen)]
+    opts = sorted(df["County"].dropna().unique())
+    sel = st.sidebar.multiselect("County", opts, default=opts)
+    df = df[df["County"].isin(sel)]
 
-# ─── numeric $ column + radius ---------------------------------------------
-num_col = (
-    "Total NYS Investment"
-    if "Total NYS Investment" in df.columns
-    else "Total Exemptions"
-)
+# ─── Incentive $ column ----------------------------------------------------
+num_col = next((c for c in ["Total NYS Investment", "Total Exemptions"] if c in df.columns), None)
+if num_col is None:
+    st.warning("No dollar column found to size bubbles.")
+    st.stop()
 
 df["$"] = pd.to_numeric(df[num_col], errors="coerce").fillna(0)
-df["_radius"] = df["$"] .clip(lower=1) * 2  # ensure visible bubbles
+df["_radius"] = df["$"].clip(lower=1).pow(0.5) * 40  # sqrt scaling, min radius ~40
 
-# ─── Geo‑prep: ZIP first, then County centroids -----------------------------
-zip_col = None
-for cand in [
-    "Postal Code",
-    "Project Postal Code",  # newly added header variant
-    "ZIP",
-    "Zip Code",
-    "Zip",
-]:
-    if cand in df.columns:
-        zip_col = cand
-        break
+# ─── Geocode: ZIP or County centroid --------------------------------------
+zip_candidates = ["Project Postal Code", "Postal Code", "ZIP", "Zip Code"]
+zip_col = next((c for c in zip_candidates if c in df.columns), None)
 
-if zip_col is not None:
-    # tiny hard‑coded demo lookup
-    lut = {
-        "10001": (40.7506, -73.9972),
-        "14604": (43.1566, -77.6088),
-    }
-    coords = df[zip_col].map(lut)
-    df["lat"] = coords.str[0]
-    df["lon"] = coords.str[1]
-elif "County" in df.columns:
-    county_lut = {
-        "Albany": (42.6526, -73.7562),
-        "Monroe": (43.1610, -77.6109),
-    }
-    coords = df["County"].map(county_lut)
-    df["lat"] = coords.str[0]
-    df["lon"] = coords.str[1]
+county_centroid = {
+    "Albany": (42.6526, -73.7562),
+    "Dutchess": (41.7789, -73.6773),
+    "Monroe": (43.1610, -77.6109),
+    # … extend as needed …
+}
+
+if zip_col:
+    # Minimal demo ZIP→lat/lon (add more as required)
+    lut = {"10001": (40.7506, -73.9972), "14604": (43.1566, -77.6088)}
+    coords = df[zip_col].astype(str).str[:5].map(lut)
+    df["lat"], df["lon"] = coords.str[0], coords.str[1]
 else:
-    st.warning("No ZIP or County column to geocode.")
-    st.stop()
+    coords = df["County"].map(county_centroid)
+    df["lat"], df["lon"] = coords.str[0], coords.str[1]
 
 # Drop rows without coords
-df = df.dropna(subset=["lat", "lon"])
-if df.empty:
-    st.warning("No geodata available for the selected sheet/filter.")
+geo_df = df.dropna(subset=["lat", "lon"])
+if geo_df.empty:
+    st.warning("No geodata available for the selected filter.")
     st.stop()
 
-# ─── Build map --------------------------------------------------------------
+# ─── Build layers ----------------------------------------------------------
 layer = pdk.Layer(
     "ScatterplotLayer",
-    data=df,
+    data=geo_df,
     get_position="[lon, lat]",
     get_radius="_radius",
-    radius_scale=20,
-    radius_min_pixels=4,
-    get_fill_color=[0, 122, 62, 160],
+    radius_scale=1,
+    get_fill_color=[0, 122, 62, 160],  # CBRE green semi‑transparent
     pickable=True,
 )
 view = pdk.ViewState(latitude=42.8, longitude=-75.5, zoom=5.3)
 
 st.header("Incentive Map 📍")
+
 st.pydeck_chart(
     pdk.Deck(
         layers=[layer],
         initial_view_state=view,
-        tooltip={"text": "{Project Name}\nUS$ {$:,.0f}"},
+        map_style="mapbox://styles/mapbox/dark-v11",  # ensures base‑map loads
+        tooltip={"text": "{Project Name}\nUS$ {$.2s}"},
     )
 )
 
