@@ -1,13 +1,13 @@
-"""app.py – IBM Incentive Finder (REV‑H)
+"""app.py – IBM Incentive Finder (REV‑H2)
 =================================================
-Phase‑0 polish: hero banner, chip filters, KPI cards, and strict IBM match.
+Phase‑0 polish + dynamic sheet names for ny_incentives_3.xlsx.
+
+This version auto‑detects the first two sheets in whatever workbook is present
+and shows them as "ESD State Incentives" and "Municipal IDA Projects" in the
+sidebar, while keeping the raw names internally.
 
 Requires:
     pip install streamlit streamlit-tags openpyxl pandas
-
-Workbook expected: ny_incentives_2.xlsx with two sheets:
-    • ESD Data Export – 4.17.25
-    • IDA Data Export – 2.7.25
 """
 
 import re
@@ -25,7 +25,6 @@ st.set_page_config(page_title="IBM×CBRE Incentive Finder", layout="wide")
 BRAND_BLUE = "#0033FF"
 BRAND_GREEN = "#007A3E"
 
-# Hero banner with subtle animated SVG background (thin circuit lines)
 HERO_SVG = f"""
 <svg width='0' height='0'>
   <defs>
@@ -45,7 +44,7 @@ st.components.v1.html(HERO_SVG, height=140)
 # ---------------------------------------------------------------------
 # Load workbook (cached)
 # ---------------------------------------------------------------------
-WORKBOOK = "ny_incentives_2.xlsx"
+WORKBOOK = "ny_incentives_3.xlsx"
 
 @st.cache_data(show_spinner=False)
 def load_sheets(path: str):
@@ -54,20 +53,23 @@ def load_sheets(path: str):
 
 data_dict = load_sheets(WORKBOOK)
 
-# ---------------------------------------------------------------------
-# Helper: word‑boundary search (avoids 'kibm')
-# ---------------------------------------------------------------------
+# Map raw names ➜ friendly labels for the first two sheets
+RAW_NAMES = list(data_dict.keys())[:2]
+DISPLAY_MAP = {
+    RAW_NAMES[0]: "ESD State Incentives",
+    RAW_NAMES[1]: "Municipal IDA Projects",
+}
 
-def filter_terms(df: pd.DataFrame, terms: list[str]):
-    if not terms:
-        return df.iloc[0:0]
-    pattern = r"\\b(" + "|".join(map(re.escape, terms)) + r")\\b"
-    obj_cols = df.select_dtypes("object").columns
-    mask = df[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(axis=1)
-    return df[mask]
+display_options = [DISPLAY_MAP[r] for r in RAW_NAMES] + ["All Sheets"]
+
+sheet_display = st.sidebar.radio("Choose data view", display_options, index=len(display_options)-1)
+
+sheet_choice = (
+    "All Sheets" if sheet_display == "All Sheets" else RAW_NAMES[display_options.index(sheet_display)]
+)
 
 # ---------------------------------------------------------------------
-# Sidebar – chips for synonyms and sheet selector
+# Sidebar – chips for synonyms
 # ---------------------------------------------------------------------
 st.sidebar.subheader("Search Synonyms / Code‑names")
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
@@ -78,13 +80,9 @@ terms_chips = st_tags(
     suggestions=["Project Chess", "Endicott"],
 )
 
-sheet_choice = st.sidebar.radio(
-    "Choose data view",
-    [*data_dict.keys(), "All Sheets"],
-    index=len(data_dict)  # default to All Sheets
-)
-
+# ---------------------------------------------------------------------
 # Prep dataframe based on choice
+# ---------------------------------------------------------------------
 if sheet_choice == "All Sheets":
     frames = []
     for s, df in data_dict.items():
@@ -95,6 +93,18 @@ if sheet_choice == "All Sheets":
 else:
     current_df = data_dict[sheet_choice]
 
+# ---------------------------------------------------------------------
+# Helper: word‑boundary search (avoids 'kibm')
+# ---------------------------------------------------------------------
+
+def filter_terms(df: pd.DataFrame, terms: list[str]):
+    if not terms:
+        return df.iloc[0:0]
+    pattern = r"\\b(" + "|".join(map(re.escape, terms)) + r")\\b"
+    obj_cols = df.select_dtypes("object").columns
+    mask = df[obj_cols].apply(lambda s: s.str.contains(pattern, case=False, na=False, regex=True)).any(1)
+    return df[mask]
+
 filtered_df = filter_terms(current_df, terms_chips)
 
 # ---------------------------------------------------------------------
@@ -104,7 +114,9 @@ filtered_df = filter_terms(current_df, terms_chips)
 def to_num(series):
     return pd.to_numeric(series, errors="coerce").fillna(0)
 
-authority = "ESD" if "ESD" in sheet_choice else "IDA" if "IDA" in sheet_choice else "All"
+authority = (
+    "ESD" if "ESD" in sheet_choice else "IDA" if "IDA" in sheet_choice else "All"
+)
 
 # Approvals
 kpi_approvals = len(filtered_df)
@@ -122,7 +134,9 @@ if authority in ("IDA", "All") and {
     "Total Exemptions",
     "State Sales Tax Exemption Amount",
 }.issubset(filtered_df.columns):
-    local_val = (to_num(filtered_df["Total Exemptions"]) - to_num(filtered_df["State Sales Tax Exemption Amount"])) .sum()
+    local_val = (
+        to_num(filtered_df["Total Exemptions"]) - to_num(filtered_df["State Sales Tax Exemption Amount"])
+    ).sum()
 
 # CapEx
 capex_val = 0.0
