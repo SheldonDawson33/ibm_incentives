@@ -19,7 +19,7 @@ WORKBOOK = "ny_incentives_3.xlsx"
 assert Path(WORKBOOK).exists(), f"{WORKBOOK} not found in repo"
 
 FRIENDLY_NAMES = {
-    0: "ESD State Incentives",
+    0: "Empire State Development Incentives",
     1: "Municipal IDA Projects",
 }
 DEFAULT_TERMS = ["IBM", "International Business Machines"]
@@ -138,16 +138,19 @@ hero_html = """
 """
 st.markdown(hero_html, unsafe_allow_html=True)
 
+# Search terms -------------------------------------------------------------
+st.markdown("### Search Terms")
+terms_chips = st_tags(label="", text="Press enter to add", value=DEFAULT_TERMS, maxtags=10, key="terms")
+
 # Load data -----------------------------------------------------------------
 with st.spinner("Loading workbook …"):
     DATA = load_sheets(WORKBOOK)
 
 RAW_NAMES = list(DATA.keys())[:2]
-DISPLAY_OPTS = [FRIENDLY_NAMES.get(i, n) for i, n in enumerate(RAW_NAMES)] + ["All Sheets"]
+DISPLAY_OPTS = [FRIENDLY_NAMES.get(i, n) for i, n in enumerate(RAW_NAMES)] + ["State & Local Combined"]
 
 # Sidebar filters -----------------------------------------------------------
-st.sidebar.subheader("Add or remove terms")
-terms_chips = st_tags(label="", text="Press enter to add", value=DEFAULT_TERMS, maxtags=10)
+
 
 sheet_display = st.sidebar.radio("Choose data view", DISPLAY_OPTS, index=len(DISPLAY_OPTS)-1)
 if sheet_display == "All Sheets":
